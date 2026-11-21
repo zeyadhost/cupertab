@@ -408,7 +408,15 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 return Ret::Err(vfs::EBADF);
             }
             match cmd {
-                1..=4 => ok(0), // F_GETFD, F_SETFD, F_GETFL, F_SETFL
+                1 | 2 => ok(0), // F_GETFD, F_SETFD
+                3 => ok(k.vfs.fds[&fd].flags), // F_GETFL
+                4 => {
+                    // F_SETFL: only the status flags can change
+                    const SETTABLE: u32 = vfs::O_APPEND | 0x4; // O_NONBLOCK
+                    let f = k.vfs.fds.get_mut(&fd).unwrap();
+                    f.flags = (f.flags & !SETTABLE) | (args[2] & SETTABLE);
+                    ok(0)
+                }
                 50 => {
                     // F_GETPATH
                     let path = k.vfs.fds[&fd].path.clone();

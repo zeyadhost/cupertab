@@ -66,6 +66,8 @@ pub struct Interp {
     /// Set when the current instruction wrote r15.
     branched: bool,
     exclusive: bool,
+    /// User read-only thread ID register (TPIDRURO).
+    pub tls: u32,
 }
 
 impl Interp {
@@ -84,6 +86,7 @@ impl Interp {
             pc_read: 0,
             branched: false,
             exclusive: false,
+            tls: 0,
         }
     }
 

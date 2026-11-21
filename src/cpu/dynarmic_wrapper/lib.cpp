@@ -173,6 +173,10 @@ class ArmDynarmicCP15 : public Dynarmic::A32::Coprocessor {
   std::uint32_t addr = 0;
 
 public:
+  // User read-only thread ID register (c13, c0, 3), used by libSystem as the
+  // thread pointer.
+  std::uint32_t tpidruro = 0;
+
   using CoprocReg = Dynarmic::A32::CoprocReg;
 
   CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1,
@@ -198,8 +202,13 @@ public:
                                                CoprocReg) override {
     return CallbackOrAccessTwoWords{};
   }
-  CallbackOrAccessOneWord CompileGetOneWord(bool, unsigned, CoprocReg,
-                                            CoprocReg, unsigned) override {
+  CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1,
+                                            CoprocReg CRn, CoprocReg CRm,
+                                            unsigned opc2) override {
+    if (!two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 &&
+        opc2 == 3) {
+      return &tpidruro;
+    }
     return CallbackOrAccessOneWord{};
   }
   CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned,
@@ -224,12 +233,14 @@ class DynarmicWrapper {
   std::unique_ptr<Dynarmic::ExclusiveMonitor> mon;
   std::array<std::uint8_t *, Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>
       page_table;
+  std::shared_ptr<ArmDynarmicCP15> cp15;
 
 public:
   DynarmicWrapper(void *direct_memory_access_ptr, size_t null_page_count) {
     Dynarmic::A32::UserConfig user_config;
     user_config.callbacks = &env;
-    user_config.coprocessors[15] = std::make_shared<ArmDynarmicCP15>();
+    cp15 = std::make_shared<ArmDynarmicCP15>();
+    user_config.coprocessors[15] = cp15;
     mon = std::make_unique<Dynarmic::ExclusiveMonitor>(1);
     user_config.global_monitor = mon.get();
     // TODO: only do this in debug builds? it's probably expensive
@@ -268,6 +279,9 @@ public:
   void invalidate_cache_range(VAddr start, std::uint32_t size) {
     cpu->InvalidateCacheRange(start, size);
   }
+
+  std::uint32_t tls() const { return cp15->tpidruro; }
+  void set_tls(std::uint32_t value) { cp15->tpidruro = value; }
 
   void swap_context(touchHLE_DynarmicContext *context) {
     touchHLE_DynarmicContext tmp = {cpu->Regs(), cpu->ExtRegs(), cpu->Cpsr(),
@@ -338,6 +352,14 @@ void touchHLE_DynarmicWrapper_set_cpsr(DynarmicWrapper *cpu,
 void touchHLE_DynarmicWrapper_swap_context(DynarmicWrapper *cpu,
                                            touchHLE_DynarmicContext *context) {
   cpu->swap_context(context);
+}
+
+std::uint32_t touchHLE_DynarmicWrapper_tls(const DynarmicWrapper *cpu) {
+  return cpu->tls();
+}
+void touchHLE_DynarmicWrapper_set_tls(DynarmicWrapper *cpu,
+                                      std::uint32_t value) {
+  cpu->set_tls(value);
 }
 
 void touchHLE_DynarmicWrapper_invalidate_cache_range(DynarmicWrapper *cpu,

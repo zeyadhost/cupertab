@@ -135,11 +135,17 @@ impl Interp {
 
     pub(super) fn cp15(&mut self, ins: u32) -> Res {
         // Barrier operations (c7, c10, 4/5) and other cache maintenance are
-        // no-ops for an interpreter. Reads return 0.
+        // no-ops for an interpreter. Reads return 0, except the user
+        // read-only thread ID register (c13, c0, 3), used as the thread
+        // pointer by libSystem.
         if bit(ins, 4) && bit(ins, 20) {
             let rt = bits(ins, 15, 12);
+            let is_tpidruro = bits(ins, 23, 21) == 0
+                && bits(ins, 19, 16) == 13
+                && bits(ins, 3, 0) == 0
+                && bits(ins, 7, 5) == 3;
             if rt != 15 {
-                self.regs[rt as usize] = 0;
+                self.regs[rt as usize] = if is_tpidruro { self.tls } else { 0 };
             }
         }
         Ok(())

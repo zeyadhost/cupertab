@@ -45,6 +45,17 @@ mod fiber {
     const C_STACK_SIZE: usize = 1024 * 1024;
     const ASYNCIFY_STACK_SIZE: usize = 1024 * 1024;
 
+    /// Stacks must be 16-byte aligned: LLVM assumes the C stack pointer is,
+    /// and miscompiles stack accesses (e.g. the halves of an `i128`) if not.
+    #[derive(Clone, Copy)]
+    #[repr(C, align(16))]
+    struct StackChunk([u8; 16]);
+    type StackBuf = Vec<StackChunk>;
+
+    fn new_stack(size: usize) -> StackBuf {
+        vec![StackChunk([0; 16]); size / 16]
+    }
+
     pub enum CoroutineResult<Y, R> {
         Yield(Y),
         Return(R),
@@ -54,7 +65,7 @@ mod fiber {
     pub struct Yielder<I, Y> {
         caller: UnsafeCell<FiberT>,
         callee: UnsafeCell<FiberT>,
-        caller_asyncify_stack: UnsafeCell<Vec<u8>>,
+        caller_asyncify_stack: UnsafeCell<StackBuf>,
         input: UnsafeCell<Option<I>>,
         yielded: UnsafeCell<Option<Y>>,
     }
@@ -79,8 +90,8 @@ mod fiber {
         func: Option<Box<dyn FnOnce(&Yielder<I, Y>, I) -> R>>,
         ret: Option<R>,
         done: bool,
-        _c_stack: Vec<u8>,
-        _asyncify_stack: Vec<u8>,
+        _c_stack: StackBuf,
+        _asyncify_stack: StackBuf,
     }
 
     pub struct Coroutine<I, Y, R> {
@@ -109,15 +120,15 @@ mod fiber {
                 yielder: Yielder {
                     caller: UnsafeCell::new(FiberT([0; 64])),
                     callee: UnsafeCell::new(FiberT([0; 64])),
-                    caller_asyncify_stack: UnsafeCell::new(vec![0; ASYNCIFY_STACK_SIZE]),
+                    caller_asyncify_stack: UnsafeCell::new(new_stack(ASYNCIFY_STACK_SIZE)),
                     input: UnsafeCell::new(None),
                     yielded: UnsafeCell::new(None),
                 },
                 func: Some(Box::new(f)),
                 ret: None,
                 done: false,
-                _c_stack: vec![0; C_STACK_SIZE],
-                _asyncify_stack: vec![0; ASYNCIFY_STACK_SIZE],
+                _c_stack: new_stack(C_STACK_SIZE),
+                _asyncify_stack: new_stack(ASYNCIFY_STACK_SIZE),
             });
             let arg = &mut *inner as *mut Inner<I, Y, R> as *mut c_void;
             unsafe {
@@ -143,7 +154,7 @@ mod fiber {
                 emscripten_fiber_init_from_current_context(
                     y.caller.get(),
                     stack.as_mut_ptr().cast(),
-                    stack.len(),
+                    stack.len() * 16,
                 );
                 emscripten_fiber_swap(y.caller.get(), y.callee.get());
             }

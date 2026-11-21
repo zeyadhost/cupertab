@@ -55,9 +55,26 @@ on your machine and runs entirely in this tab.</p>
       label.classList.remove('disabled');
       input.disabled = false;
     },
-    onAbort(what) { statusEl.textContent = 'touchHLE crashed: ' + what; },
+    onAbort(what) { stopped('touchHLE crashed: ' + what); },
   };
-  window.addEventListener('error', (e) => { statusEl.textContent = 'Error: ' + e.message; });
+  // The runtime can't run main() twice, so loading another app means reloading the page.
+  let hasStopped = false;
+  function stopped(message) {
+    if (hasStopped) return;
+    hasStopped = true;
+    statusEl.textContent = message + ' (details in the log below)';
+    input.disabled = true;
+    label.firstChild.textContent = 'Load another .ipa';
+    label.classList.remove('disabled');
+    label.addEventListener('click', (e) => { e.preventDefault(); location.reload(); });
+  }
+  window.touchHLEExited = (code) => {
+    stopped(code === 0 ? 'touchHLE exited' : 'touchHLE could not run this file');
+  };
+  window.addEventListener('error', (e) => { stopped('touchHLE crashed: ' + e.message); });
+  window.addEventListener('unhandledrejection', (e) => {
+    stopped('touchHLE crashed: ' + (e.reason && e.reason.message || e.reason));
+  });
   input.addEventListener('change', async () => {
     const file = input.files[0];
     if (!file) return;
@@ -74,7 +91,7 @@ on your machine and runs entirely in this tab.</p>
     try {
       Module.callMain(['/touchHLE_apps/' + name]);
     } catch (e) {
-      if (e !== 'unwind') { statusEl.textContent = 'touchHLE stopped: ' + e; throw e; }
+      if (e !== 'unwind') { stopped('touchHLE stopped: ' + e); throw e; }
     }
   });
 </script>

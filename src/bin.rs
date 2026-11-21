@@ -8,5 +8,19 @@
 #![allow(non_snake_case)]
 
 fn main() -> Result<(), String> {
-    touchHLE::main(std::env::args())
+    let result = touchHLE::main(std::env::args());
+    // Let the web page know the emulator stopped, so it can offer to load another app.
+    #[cfg(target_os = "emscripten")]
+    {
+        extern "C" {
+            fn emscripten_run_script(script: *const std::ffi::c_char);
+        }
+        let script = if result.is_ok() {
+            c"globalThis.touchHLEExited?.(0)"
+        } else {
+            c"globalThis.touchHLEExited?.(1)"
+        };
+        unsafe { emscripten_run_script(script.as_ptr()) };
+    }
+    result
 }

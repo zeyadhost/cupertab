@@ -653,14 +653,23 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     let old_clear_color: [GLfloat; 4] = get_floats(gles, gles11::COLOR_CLEAR_VALUE);
     let old_array_buffer: GLuint = get_int(gles, gles11::ARRAY_BUFFER_BINDING) as _;
     let old_vertex_array_binding: GLuint = get_int(gles, gles11::VERTEX_ARRAY_BUFFER_BINDING) as _;
-    let old_vertex_array_size: GLint = get_int(gles, gles11::VERTEX_ARRAY_SIZE);
-    let old_vertex_array_type: GLenum = get_int(gles, gles11::VERTEX_ARRAY_TYPE) as _;
+    // gl4es reports 0 for the pointer size and type until a pointer is set;
+    // GL's initial values are 4 and FLOAT.
+    let valid_size = |size: GLint| if (2..=4).contains(&size) { size } else { 4 };
+    let valid_type = |type_: GLenum| match type_ {
+        gles11::SHORT | gles11::FLOAT | gles11::FIXED => type_,
+        _ => gles11::FLOAT,
+    };
+    let old_vertex_array_size: GLint = valid_size(get_int(gles, gles11::VERTEX_ARRAY_SIZE));
+    let old_vertex_array_type: GLenum = valid_type(get_int(gles, gles11::VERTEX_ARRAY_TYPE) as _);
     let old_vertex_array_stride: GLsizei = get_int(gles, gles11::VERTEX_ARRAY_STRIDE) as _;
     let old_vertex_array_pointer = get_ptr(gles, gles11::VERTEX_ARRAY_POINTER);
     let old_tex_coord_array_binding: GLuint =
         get_int(gles, gles11::TEXTURE_COORD_ARRAY_BUFFER_BINDING) as _;
-    let old_tex_coord_array_size: GLint = get_int(gles, gles11::TEXTURE_COORD_ARRAY_SIZE);
-    let old_tex_coord_array_type: GLenum = get_int(gles, gles11::TEXTURE_COORD_ARRAY_TYPE) as _;
+    let old_tex_coord_array_size: GLint =
+        valid_size(get_int(gles, gles11::TEXTURE_COORD_ARRAY_SIZE));
+    let old_tex_coord_array_type: GLenum =
+        valid_type(get_int(gles, gles11::TEXTURE_COORD_ARRAY_TYPE) as _);
     let old_tex_coord_array_stride: GLsizei =
         get_int(gles, gles11::TEXTURE_COORD_ARRAY_STRIDE) as _;
     let old_tex_coord_array_pointer = get_ptr(gles, gles11::TEXTURE_COORD_ARRAY_POINTER);

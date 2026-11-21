@@ -251,7 +251,15 @@ impl Kernel {
         self.cpu.swap_context(&mut ctx);
         // ctx now holds the old thread's state
         let next_ctx = self.threads[idx].context.take();
-        self.threads[self.current].context = Some(ctx);
+        let cur = &mut self.threads[self.current];
+        if cur.exited {
+            // A finished thread's context and port are freed; its slot is
+            // reused by the next spawn_thread.
+            let port = cur.port;
+            self.ipc.ports.remove(&port);
+        } else {
+            cur.context = Some(ctx);
+        }
         if let Some(mut next_ctx) = next_ctx {
             self.cpu.swap_context(&mut next_ctx);
         }
@@ -268,7 +276,10 @@ impl Kernel {
         tls: u32,
         regs: impl FnOnce(u32) -> [u32; 6],
     ) -> u32 {
-        let id = self.threads.len() as u32;
+        let reuse = (0..self.threads.len()).find(|&i| {
+            i != self.current && self.threads[i].exited && self.threads[i].context.is_none()
+        });
+        let id = reuse.unwrap_or(self.threads.len()) as u32;
         let port = self.ipc.new_kernel_port(mach::KObject::Thread(id));
         let mut ctx = Box::new(CpuContext::new());
         // Build the context on the CPU, then swap the current thread back.
@@ -282,14 +293,18 @@ impl Kernel {
         self.cpu
             .set_cpsr(Cpu::CPSR_USER_MODE | if pc & 1 != 0 { Cpu::CPSR_THUMB } else { 0 });
         self.cpu.swap_context(&mut ctx);
-        self.threads.push(Thread {
+        let thread = Thread {
             id,
             port,
             context: Some(ctx),
             tls,
             blocked: None,
             exited: false,
-        });
+        };
+        match reuse {
+            Some(i) => self.threads[i] = thread,
+            None => self.threads.push(thread),
+        }
         port
     }
 

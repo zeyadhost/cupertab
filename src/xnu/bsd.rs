@@ -23,6 +23,8 @@ const ENOTTY: u32 = 25;
 const ESPIPE: u32 = 29;
 const ENOSYS: u32 = 78;
 const ENOTSUP: u32 = 45;
+const ENOTSOCK: u32 = 38;
+const EAFNOSUPPORT: u32 = 47;
 
 fn ok(v: u32) -> Ret {
     Ret::Ok(v, 0)
@@ -356,6 +358,69 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             res(k.vfs.stat(&k.fw, &path, true).map(|_| 0))
         }
         37 => ok(0), // kill
+        // recvfrom(fd, buf, len, flags, from, fromlen)
+        29 => k.do_read(args[0], args[1], args[2], None),
+        // socket(domain, type, protocol): only AF_UNIX
+        97 if args[0] == 1 => ok(k.vfs.alloc_fd(OpenFile {
+            kind: FileKind::Socket(Default::default()),
+            offset: 0,
+            path: String::new(),
+            flags: 2,
+        })),
+        97 => Ret::Err(EAFNOSUPPORT),
+        // connect(fd, sockaddr_un, len)
+        98 => {
+            let path = read_cstr(&k.mem, args[1] + 2);
+            let Some(FileKind::Socket(s)) = k.vfs.fds.get_mut(&args[0]).map(|f| &mut f.kind) else {
+                return Ret::Err(ENOTSOCK);
+            };
+            if path == super::lockdown::LOCKDOWN_SOCKET {
+                s.service = Some(super::lockdown::Lockdownd::new(&k.fw.info));
+                ok(0)
+            } else {
+                log!("xnu: connect({path:?}): no such socket");
+                Ret::Err(vfs::ENOENT)
+            }
+        }
+        105 => ok(0), // setsockopt
+        // select(nfds, readfds, writefds, errorfds, timeout): never blocks.
+        // A socket is readable once its service has replied; other
+        // descriptors are always ready.
+        93 | 407 => {
+            let mut ready = 0;
+            for (set, reading) in [(args[1], true), (args[2], false), (args[3], false)] {
+                if set == 0 {
+                    continue;
+                }
+                for word in 0..args[0].div_ceil(32) {
+                    let mut bits = read_u32(&k.mem, set + 4 * word);
+                    for bit in 0..32 {
+                        let fd = word * 32 + bit;
+                        if bits & 1 << bit == 0 {
+                            continue;
+                        }
+                        let is_ready = set != args[3]
+                            && match k.vfs.fds.get(&fd).map(|f| &f.kind) {
+                                Some(FileKind::Socket(s)) => !reading || s.readable(),
+                                Some(_) => true,
+                                None => return Ret::Err(vfs::EBADF),
+                            };
+                        if is_ready {
+                            ready += 1;
+                        } else {
+                            bits &= !(1 << bit);
+                        }
+                    }
+                    write_u32(&mut k.mem, set + 4 * word, bits);
+                }
+            }
+            ok(ready)
+        }
+        // sendto(fd, buf, len, flags, to, tolen)
+        133 => {
+            let data = read_bytes(&k.mem, args[1], args[2]);
+            res(k.vfs.write(args[0], &data, None).map(|n| n as u32))
+        }
         41 => {
             let fd = args[0];
             match k.vfs.fds.get(&fd) {

@@ -13,6 +13,7 @@
 mod bsd;
 mod iokit;
 mod loader;
+pub mod lockdown;
 mod mach;
 mod vfs;
 mod vm;

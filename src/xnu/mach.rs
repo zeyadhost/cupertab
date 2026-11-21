@@ -163,7 +163,7 @@ impl Kernel {
                 }
             }
         }
-        if let Some(v) = self.iokit.vsync.as_mut() {
+        for v in self.iokit.vsyncs.values_mut() {
             if v.next <= now {
                 v.next = now + super::iokit::VSync::PERIOD;
                 let m = v.message(now);

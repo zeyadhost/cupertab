@@ -44,10 +44,10 @@ pub struct Registry {
     pub entries: Vec<Entry>,
     /// Surfaces made through `IOCoreSurfaceRoot`, by ID minus one.
     pub surfaces: Vec<Surface>,
-    /// Async notification ports set on user clients, by entry.
-    pub notify_ports: std::collections::HashMap<usize, u32>,
-    /// The framebuffer's vsync callback, while enabled.
-    pub vsync: Option<VSync>,
+    /// Async notification ports set on user clients, by connection port.
+    pub notify_ports: std::collections::HashMap<u32, u32>,
+    /// Enabled framebuffer vsync callbacks, by connection port.
+    pub vsyncs: std::collections::HashMap<u32, VSync>,
 }
 
 /// A framebuffer vsync callback, sent at 60 Hz as an async completion.
@@ -107,7 +107,7 @@ impl Registry {
             entries: Vec::new(),
             surfaces: Vec::new(),
             notify_ports: Default::default(),
-            vsync: None,
+            vsyncs: Default::default(),
         };
         let root = r.add(
             None,
@@ -366,7 +366,7 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             let inband_out_max = le(msg, tail + 12) as usize;
             let class = k.iokit.entries[e].class.clone();
             let result = if class.ends_with("CLCD") {
-                framebuffer_method(k, e, selector, &scalars, inband)
+                framebuffer_method(k, le(msg, 8), selector, &scalars, inband)
             } else if class == "IOCoreSurfaceRoot" {
                 surface_method(k, selector, &scalars, inband)
             } else {
@@ -390,9 +390,9 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
         }
         // io_connect_set_notification_port(connection, type, port, reference)
         // A complex request: the port descriptor comes first.
-        (2818, KObject::IoConnect(e)) => {
+        (2818, KObject::IoConnect(_)) => {
             if le(msg, 0) & 0x80000000 != 0 && msg.len() >= 32 {
-                k.iokit.notify_ports.insert(e, le(msg, 28));
+                k.iokit.notify_ports.insert(le(msg, 8), le(msg, 28));
             }
             err(KERN_SUCCESS)
         }
@@ -419,7 +419,11 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             pos: 0,
         })),
         // io_service_close(connection)
-        (2816, KObject::IoConnect(_)) => err(KERN_SUCCESS),
+        (2816, KObject::IoConnect(_)) => {
+            k.iokit.notify_ports.remove(&le(msg, 8));
+            k.iokit.vsyncs.remove(&le(msg, 8));
+            err(KERN_SUCCESS)
+        }
         // io_registry_get_root_entry(master)
         (2827, KObject::IoMaster) => port_reply(k.ipc.new_kernel_port(KObject::IoEntry(0))),
         // io_iterator_next(iterator)
@@ -544,7 +548,7 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
 /// device's size. Returns scalar and struct outputs.
 fn framebuffer_method(
     k: &mut Kernel,
-    entry: usize,
+    connection: u32,
     selector: u32,
     scalars: &[u64],
     _inband: &[u8],
@@ -569,15 +573,21 @@ fn framebuffer_method(
         9 => {
             let callback = *scalars.first()? as u32;
             let refcon = scalars.get(1).map_or(0, |&v| v as u32);
-            k.iokit.vsync = match k.iokit.notify_ports.get(&entry) {
-                Some(&port) if callback != 0 => Some(VSync {
-                    port,
-                    callback,
-                    refcon,
-                    next: k.absolute_time() + VSync::PERIOD,
-                }),
-                _ => None,
-            };
+            match k.iokit.notify_ports.get(&connection) {
+                Some(&port) if callback != 0 => {
+                    let next = k.absolute_time() + VSync::PERIOD;
+                    let v = VSync {
+                        port,
+                        callback,
+                        refcon,
+                        next,
+                    };
+                    k.iokit.vsyncs.insert(connection, v);
+                }
+                _ => {
+                    k.iokit.vsyncs.remove(&connection);
+                }
+            }
             (Vec::new(), Vec::new())
         }
         _ => return None,

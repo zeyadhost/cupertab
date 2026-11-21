@@ -120,7 +120,15 @@ impl Vfs {
     }
 
     fn host_path(&self, path: &str) -> PathBuf {
-        self.overlay.join(path.trim_start_matches('/'))
+        // Only plain components, so no guest path (e.g. "/C:/x" on Windows)
+        // can leave the overlay.
+        let mut p = self.overlay.clone();
+        for c in path.split('/') {
+            if !c.is_empty() && c != "." && c != ".." && !c.contains([':', '\\']) {
+                p.push(c);
+            }
+        }
+        p
     }
 
     /// Resolves symlinks in the firmware's directories so the overlay sees

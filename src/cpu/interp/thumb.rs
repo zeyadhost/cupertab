@@ -288,7 +288,7 @@ impl Interp {
         let hw1 = ins >> 16;
         let hw2 = ins & 0xffff;
         // BL / BLX (immediate)
-        if hw1 >> 11 == 0b11110 && (hw2 >> 14) == 0b11 && (hw2 & 0x1000 != 0 || hw2 & 0x0800 == 0) {
+        if hw1 >> 11 == 0b11110 && (hw2 >> 14) == 0b11 && (hw2 & 0x1000 != 0 || hw2 & 1 == 0) {
             let s = (hw1 >> 10) & 1;
             let j1 = (hw2 >> 13) & 1;
             let j2 = (hw2 >> 11) & 1;

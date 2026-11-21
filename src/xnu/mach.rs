@@ -291,6 +291,22 @@ impl Kernel {
                 }
                 r(KERN_SUCCESS)
             }
+            // mach_port_get_attributes(task, name, flavor, &info, &count): the
+            // queue limit, receive status or dead-name table size, as XNU
+            // reports them for a fresh port.
+            3217 => {
+                const QLIMIT_DEFAULT: u32 = 5;
+                let info: &[u32] = match arg(1) {
+                    1 => &[QLIMIT_DEFAULT],
+                    2 => &[0, 0, 0, QLIMIT_DEFAULT, 0, 0, 0, 0, 0, 0],
+                    3 => &[0],
+                    _ => return r(KERN_INVALID_ARGUMENT),
+                };
+                let count = info.len().min(arg(2) as usize);
+                let mut words = vec![KERN_SUCCESS, count as u32];
+                words.extend_from_slice(&info[..count]);
+                Some(reply(msg, &words, &[]))
+            }
             // mach_port_insert_right, set_attributes and the like
             3214..=3230 => r(KERN_SUCCESS),
             // host_get_io_master

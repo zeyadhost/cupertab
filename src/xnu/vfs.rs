@@ -65,6 +65,8 @@ pub struct Vfs {
     overlay: PathBuf,
     pub fds: HashMap<u32, OpenFile>,
     pub cwd: String,
+    /// Firmware paths deleted or renamed away by the guest.
+    deleted: std::collections::HashSet<String>,
 }
 
 pub enum Resolved<'a> {
@@ -110,6 +112,7 @@ impl Vfs {
             overlay: overlay.to_path_buf(),
             fds,
             cwd: "/".into(),
+            deleted: Default::default(),
         }
     }
 
@@ -159,11 +162,24 @@ impl Vfs {
         }
     }
 
+    /// Like [Self::canonical], but also follows a symlink in the last
+    /// component, as listing a directory does.
+    pub fn canonical_dir(&self, fw: &Firmware, path: &str) -> String {
+        let c = self.canonical(fw, &format!("{path}/_"));
+        c.strip_suffix("/_")
+            .filter(|c| !c.is_empty())
+            .unwrap_or("/")
+            .to_string()
+    }
+
     pub fn resolve<'a>(&self, fw: &'a Firmware, path: &str, follow: bool) -> Option<Resolved<'a>> {
         let path = self.canonical(fw, path);
         let host = self.host_path(&path);
         if std::fs::symlink_metadata(&host).is_ok() {
             return Some(Resolved::Host(host));
+        }
+        if self.deleted.contains(&path) {
+            return None;
         }
         fw.volume.lookup(&path, follow).map(Resolved::Firmware)
     }
@@ -247,6 +263,9 @@ impl Vfs {
             }));
         }
         let canon = self.canonical(fw, path);
+        if flags & O_CREAT != 0 {
+            self.deleted.remove(&canon);
+        }
         let writing = flags & 3 != 0 || flags & (O_CREAT | O_TRUNC) != 0;
         let existing = self.resolve(fw, &canon, true);
         if existing.is_some() && flags & O_CREAT != 0 && flags & O_EXCL != 0 {
@@ -254,7 +273,7 @@ impl Vfs {
         }
         let kind = match existing {
             Some(Resolved::Firmware(n)) if n.is_dir() => {
-                let entries = self.list_dir(fw, &canon);
+                let entries = self.list_dir(fw, &self.canonical_dir(fw, &canon));
                 FileKind::Dir {
                     path: canon.clone(),
                     entries,
@@ -263,7 +282,7 @@ impl Vfs {
             }
             Some(Resolved::Firmware(n)) if !writing => FileKind::Firmware { node: n.id },
             Some(Resolved::Host(p)) if p.is_dir() => {
-                let entries = self.list_dir(fw, &canon);
+                let entries = self.list_dir(fw, &self.canonical_dir(fw, &canon));
                 FileKind::Dir {
                     path: canon.clone(),
                     entries,
@@ -306,6 +325,12 @@ impl Vfs {
         let mut entries: Vec<(String, u8, u64)> = vec![(".".into(), 4, 2), ("..".into(), 4, 2)];
         if let Some(dir) = fw.volume.lookup(canon, true) {
             for n in fw.volume.children(dir.id) {
+                if self
+                    .deleted
+                    .contains(&format!("{}/{}", canon.trim_end_matches('/'), n.name))
+                {
+                    continue;
+                }
                 let t = if n.is_dir() {
                     4
                 } else if n.is_symlink() {
@@ -430,23 +455,36 @@ impl Vfs {
         std::fs::create_dir_all(self.host_path(&self.canonical(fw, path))).map_err(|_| EACCES)
     }
 
-    pub fn unlink(&self, fw: &Firmware, path: &str) -> Result<(), u32> {
+    pub fn unlink(&mut self, fw: &Firmware, path: &str) -> Result<(), u32> {
+        let canon = self.canonical(fw, path);
         match self.resolve(fw, path, false).ok_or(ENOENT)? {
-            Resolved::Host(p) => std::fs::remove_file(p)
-                .or_else(|_| std::fs::remove_dir(self.host_path(&self.canonical(fw, path))))
-                .map_err(|_| EACCES),
+            Resolved::Host(p) => {
+                std::fs::remove_file(&p)
+                    .or_else(|_| std::fs::remove_dir(&p))
+                    .map_err(|_| EACCES)?;
+                if fw.volume.lookup(&canon, false).is_some() {
+                    self.deleted.insert(canon);
+                }
+                Ok(())
+            }
             Resolved::Firmware(_) => Err(EACCES),
         }
     }
 
-    pub fn rename(&self, fw: &Firmware, from: &str, to: &str) -> Result<(), u32> {
+    pub fn rename(&mut self, fw: &Firmware, from: &str, to: &str) -> Result<(), u32> {
+        let (from_canon, to_canon) = (self.canonical(fw, from), self.canonical(fw, to));
         match self.resolve(fw, from, false).ok_or(ENOENT)? {
             Resolved::Host(p) => {
-                let dest = self.host_path(&self.canonical(fw, to));
+                let dest = self.host_path(&to_canon);
                 if let Some(parent) = dest.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                std::fs::rename(p, dest).map_err(|_| EACCES)
+                std::fs::rename(p, dest).map_err(|_| EACCES)?;
+                if fw.volume.lookup(&from_canon, false).is_some() {
+                    self.deleted.insert(from_canon);
+                }
+                self.deleted.remove(&to_canon);
+                Ok(())
             }
             Resolved::Firmware(_) => Err(EACCES),
         }

@@ -225,13 +225,24 @@ impl Kernel {
             None
         };
         let base = if flags & MAP_FIXED != 0 {
-            if self.vm.map_fixed(addr, size, Prot::from_bits(prot), "mmap".into()).is_err() {
+            if self
+                .vm
+                .map_fixed(addr, size, Prot::from_bits(prot), "mmap".into())
+                .is_err()
+            {
                 return Ret::Err(ENOMEM);
             }
             addr
         } else {
-            let hint = if addr != 0 && self.vm.is_free(addr, size) { addr } else { 0 };
-            match self.vm.map_anywhere(hint, size, 0, Prot::from_bits(prot), "mmap".into()) {
+            let hint = if addr != 0 && self.vm.is_free(addr, size) {
+                addr
+            } else {
+                0
+            };
+            match self
+                .vm
+                .map_anywhere(hint, size, 0, Prot::from_bits(prot), "mmap".into())
+            {
                 Some(a) => a,
                 None => return Ret::Err(ENOMEM),
             }
@@ -410,7 +421,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 return Ret::Err(vfs::EBADF);
             }
             match cmd {
-                1 | 2 => ok(0), // F_GETFD, F_SETFD
+                1 | 2 => ok(0),                // F_GETFD, F_SETFD
                 3 => ok(k.vfs.fds[&fd].flags), // F_GETFL
                 4 => {
                     // F_SETFL: only the status flags can change

@@ -112,9 +112,11 @@ impl Registry {
     /// `IOProviderClass` and `IONameMatch` with string values are understood.
     pub fn matching(&self, dict: &str) -> Vec<usize> {
         let value = |key: &str| {
-            let k = format!("<key>{key}</key><string>");
-            let s = dict.find(&k)? + k.len();
-            Some(&dict[s..s + dict[s..].find('<')?])
+            let k = format!("<key>{key}</key>");
+            let rest = dict[dict.find(&k)? + k.len()..].trim_start();
+            let rest = rest.strip_prefix("<string")?;
+            let rest = &rest[rest.find('>')? + 1..];
+            Some(&rest[..rest.find('<')?])
         };
         let (class, name) = (value("IOProviderClass"), value("IONameMatch"));
         if class.is_none() && name.is_none() {

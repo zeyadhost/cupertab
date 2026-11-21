@@ -230,6 +230,7 @@ impl Kernel {
             let rep = super::iokit::msg(self, obj.clone(), msg);
             if rep.is_none() {
                 log!("xnu: unhandled IOKit request {id} to {obj:?}");
+                return r(MIG_BAD_ID);
             }
             return rep;
         }

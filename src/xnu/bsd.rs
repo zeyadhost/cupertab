@@ -204,39 +204,35 @@ impl Kernel {
             return Ret::Err(EINVAL);
         }
         let size = round_up(len);
+        // Read file contents before touching the address space, so a bad
+        // descriptor leaves existing mappings intact.
+        let contents = if flags & MAP_ANON == 0 {
+            let mut tmp = vec![0u8; len as usize];
+            match self.vfs.read(&self.fw, fd, &mut tmp, Some(offset)) {
+                Ok(n) => {
+                    tmp.truncate(n);
+                    Some(tmp)
+                }
+                Err(e) => return Ret::Err(e),
+            }
+        } else {
+            None
+        };
         let base = if flags & MAP_FIXED != 0 {
-            if self
-                .vm
-                .map_fixed(addr, size, Prot::from_bits(prot), "mmap".into())
-                .is_err()
-            {
+            if self.vm.map_fixed(addr, size, Prot::from_bits(prot), "mmap".into()).is_err() {
                 return Ret::Err(ENOMEM);
             }
             addr
         } else {
-            let hint = if addr != 0 && self.vm.is_free(addr, size) {
-                addr
-            } else {
-                0
-            };
-            match self
-                .vm
-                .map_anywhere(hint, size, 0, Prot::from_bits(prot), "mmap".into())
-            {
+            let hint = if addr != 0 && self.vm.is_free(addr, size) { addr } else { 0 };
+            match self.vm.map_anywhere(hint, size, 0, Prot::from_bits(prot), "mmap".into()) {
                 Some(a) => a,
                 None => return Ret::Err(ENOMEM),
             }
         };
         write_bytes(&mut self.mem, base, &vec![0u8; size as usize]);
-        if flags & MAP_ANON == 0 {
-            let mut tmp = vec![0u8; len as usize];
-            match self.vfs.read(&self.fw, fd, &mut tmp, Some(offset)) {
-                Ok(n) => write_bytes(&mut self.mem, base, &tmp[..n]),
-                Err(e) => {
-                    self.vm.unmap(base, size);
-                    return Ret::Err(e);
-                }
-            }
+        if let Some(contents) = contents {
+            write_bytes(&mut self.mem, base, &contents);
             self.cpu.invalidate_cache_range(base, size);
         }
         ok(base)

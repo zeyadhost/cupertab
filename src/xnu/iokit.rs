@@ -44,6 +44,8 @@ pub struct Registry {
     pub entries: Vec<Entry>,
     /// Surfaces made through `IOCoreSurfaceRoot`, by ID minus one.
     pub surfaces: Vec<Surface>,
+    /// The IOSurface the LCD shows, from the last swap.
+    pub presented_surface: u32,
     /// MBX2D's command buffer, allocated on first use.
     pub mbx_command_buffer: u32,
     /// Async notification ports set on user clients, by connection port.
@@ -110,6 +112,7 @@ impl Registry {
         let mut r = Registry {
             entries: Vec::new(),
             surfaces: Vec::new(),
+            presented_surface: 0,
             mbx_command_buffer: 0,
             notify_ports: Default::default(),
             vsyncs: Default::default(),
@@ -564,7 +567,7 @@ fn framebuffer_method(
     connection: u32,
     selector: u32,
     scalars: &[u64],
-    _inband: &[u8],
+    inband: &[u8],
 ) -> Option<(Vec<u64>, Vec<u8>)> {
     let (w, h) = display_size(&k.fw.info.product_type);
     Some(match selector {
@@ -579,6 +582,12 @@ fn framebuffer_method(
                 }
             }
             (Vec::new(), t)
+        }
+        // Swap: the second word of the 140-byte request is the IOSurface to
+        // show, or 0 for none.
+        5 if inband.len() >= 8 => {
+            k.iokit.presented_surface = le(inband, 4);
+            (vec![0], Vec::new())
         }
         3 | 4 | 5 | 7 | 12 | 15 | 17 | 19 | 22 | 33 => (vec![0], Vec::new()),
         // Enable vsync notifications with (callback, refcon), or disable

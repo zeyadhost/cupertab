@@ -201,7 +201,7 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             .as_ref()
             .and_then(|p| p.to_str())
             .unwrap_or("/System/Library/CoreServices/SpringBoard.app/SpringBoard");
-        return xnu::boot_firmware(&ipsw_path, rootfs_key.as_deref(), exe);
+        return xnu::boot_firmware(&ipsw_path, rootfs_key.as_deref(), exe, options.headless);
     }
 
     if let Some(ipsw_path) = firmware_info {

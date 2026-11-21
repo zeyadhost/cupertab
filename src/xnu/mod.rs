@@ -107,6 +107,9 @@ pub struct Kernel {
     pub trace: bool,
     /// Set by thread_switch/swtch so another thread runs next.
     pub yield_requested: bool,
+    /// Shows the LCD's surface, when booted with a window.
+    pub window: Option<Box<crate::window::Window>>,
+    pub last_present: std::time::Instant,
     next_tid: u64,
 }
 
@@ -186,6 +189,8 @@ impl Kernel {
             pthread_size: 0,
             trace: std::env::var_os("TOUCHHLE_XNU_TRACE").is_some(),
             yield_requested: false,
+            window: None,
+            last_present: std::time::Instant::now(),
             next_tid: 1,
         })
     }
@@ -382,9 +387,50 @@ impl Kernel {
         self.cpu.regs_mut()[0] = r0;
     }
 
+    /// Copies the surface the LCD shows to the window and handles its
+    /// events.
+    fn present(&mut self) {
+        self.last_present = std::time::Instant::now();
+        let Some(window) = self.window.as_mut() else {
+            return;
+        };
+        let options = crate::options::Options::default();
+        window.poll_for_events(&options);
+        while let Some(event) = window.pop_event() {
+            if matches!(event, crate::window::Event::Quit) {
+                self.exit_status.get_or_insert(0);
+            }
+        }
+        let id = self.iokit.presented_surface;
+        let Some(s) = id
+            .checked_sub(1)
+            .and_then(|i| self.iokit.surfaces.get(i as usize))
+        else {
+            // With no surface the LCD shows its black background.
+            let black = crate::image::Image::from_pixel_vec(vec![0, 0, 0, 255], (1, 1));
+            window.display_image(black);
+            return;
+        };
+        if s.bytes_per_element != 4 {
+            return;
+        }
+        let mut pixels = Vec::with_capacity((s.width * s.height * 4) as usize);
+        for y in 0..s.height {
+            let row = read_bytes(&self.mem, s.addr + y * s.bytes_per_row, s.width * 4);
+            for bgra in row.chunks(4) {
+                pixels.extend([bgra[2], bgra[1], bgra[0], 255]);
+            }
+        }
+        let image = crate::image::Image::from_pixel_vec(pixels, (s.width, s.height));
+        window.display_image(image);
+    }
+
     pub fn run(&mut self) -> Result<i32, String> {
         let mut ticks_left: u64;
         loop {
+            if self.last_present.elapsed() >= std::time::Duration::from_millis(16) {
+                self.present();
+            }
             if let Some(status) = self.exit_status {
                 return Ok(status);
             }
@@ -556,11 +602,24 @@ impl Kernel {
     }
 }
 
-pub fn boot_firmware(ipsw_path: &Path, key: Option<&str>, exe_path: &str) -> Result<(), String> {
+pub fn boot_firmware(
+    ipsw_path: &Path,
+    key: Option<&str>,
+    exe_path: &str,
+    headless: bool,
+) -> Result<(), String> {
     let base = crate::paths::user_data_base_path().join(crate::paths::FIRMWARE_DIR);
     let fw = Firmware::open(ipsw_path, &base, key)?;
     let overlay = base.join(format!("{}_{}_data", fw.info.product_type, fw.info.build));
     let mut kernel = Kernel::boot(fw, &overlay, exe_path, vec![exe_path.to_string()])?;
+    if !headless {
+        kernel.window = Some(Box::new(crate::window::Window::new(
+            "touchHLE (iPhone OS firmware)",
+            None,
+            None,
+            &crate::options::Options::default(),
+        )));
+    }
     let status = kernel.run()?;
     log!("xnu: process exited with status {status}");
     Ok(())

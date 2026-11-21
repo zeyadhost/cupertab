@@ -705,7 +705,7 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
     let end = start + len;
     while at + 4 <= end {
         let n = read_u32(&k.mem, at);
-        if n == 0 || !n.is_multiple_of(4) || at + 4 + n > end {
+        if n == 0 || !n.is_multiple_of(4) || n > end - at - 4 {
             break;
         }
         let w: Vec<u32> = (1..=n / 4).map(|i| read_u32(&k.mem, at + 4 * i)).collect();

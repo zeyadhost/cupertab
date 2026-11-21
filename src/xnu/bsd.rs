@@ -359,7 +359,18 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         37 => ok(0), // kill
         // recvfrom(fd, buf, len, flags, from, fromlen)
-        29 => k.do_read(args[0], args[1], args[2], None),
+        29 => {
+            const MSG_PEEK: u32 = 2;
+            match k.vfs.fds.get(&args[0]).map(|f| &f.kind) {
+                Some(FileKind::Socket(s)) if args[3] & MSG_PEEK != 0 => {
+                    let mut tmp = vec![0u8; args[2] as usize];
+                    let n = s.peek(&mut tmp);
+                    write_bytes(&mut k.mem, args[1], &tmp[..n]);
+                    ok(n as u32)
+                }
+                _ => k.do_read(args[0], args[1], args[2], None),
+            }
+        }
         // socket(domain, type, protocol): only AF_UNIX
         97 if args[0] == 1 => ok(k.vfs.alloc_fd(OpenFile {
             kind: FileKind::Socket(Default::default()),

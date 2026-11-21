@@ -31,6 +31,15 @@ impl Socket {
         !self.rx.is_empty()
     }
 
+    /// Copies queued bytes without consuming them, for `MSG_PEEK`.
+    pub fn peek(&self, buf: &mut [u8]) -> usize {
+        let n = buf.len().min(self.rx.len());
+        for (b, v) in buf.iter_mut().zip(self.rx.iter()) {
+            *b = *v;
+        }
+        n
+    }
+
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let n = buf.len().min(self.rx.len());
         for (b, v) in buf.iter_mut().zip(self.rx.drain(..n)) {

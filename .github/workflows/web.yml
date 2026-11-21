@@ -23,7 +23,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Fetch gl4es
-        run: git submodule update --init --depth 1 vendor/gl4es
+        run: git submodule update --init --depth 1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-emscripten

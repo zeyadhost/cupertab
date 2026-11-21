@@ -651,7 +651,7 @@ impl Kernel {
                 let mut trailer = vec![0u8; trailer_size as usize];
                 trailer[4..8].copy_from_slice(&trailer_size.to_le_bytes());
                 if trailer_size >= 52 {
-                    // audit_token_t starts at offset 20; its sixth word is the PID
+                    // audit_token_t starts at offset 20; word 5 is the PID
                     trailer[40..44].copy_from_slice(&1u32.to_le_bytes());
                 }
                 write_bytes(&mut self.mem, msg + m.len() as u32, &trailer);

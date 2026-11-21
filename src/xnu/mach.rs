@@ -430,8 +430,21 @@ impl Kernel {
             // vm_copy / mach_vm_copy(task, src, size, dst), 32-bit addresses
             3808 | 4807 => {
                 let (src, size, dst) = (arg(0), arg(1), arg(2));
-                let mapped = |a: u32| size == 0 || (a != 0 && self.vm.region_at(a).is_some());
-                if !mapped(src) || !mapped(dst) || src.checked_add(size).is_none() {
+                // Every page of both ranges has to be mapped.
+                let mapped = |a: u32| {
+                    let end = a as u64 + size as u64;
+                    let mut at = a as u64;
+                    while at < end {
+                        match self.vm.region_at(at as u32) {
+                            Some((base, region)) if a != 0 && end <= 1 << 32 => {
+                                at = base as u64 + region.size as u64;
+                            }
+                            _ => return false,
+                        }
+                    }
+                    true
+                };
+                if !mapped(src) || !mapped(dst) {
                     return r(KERN_INVALID_ADDRESS);
                 }
                 let bytes = read_bytes(&self.mem, src, size);

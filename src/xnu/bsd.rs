@@ -329,7 +329,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 Err(e) => Ret::Err(e),
             }
         }
-        15 | 16 | 124 | 123 | 34 | 35 | 95 | 131 | 138 | 139 => ok(0), // chmod, chown, fchmod, fchown, chflags, fchflags, fsync, flock, utimes, futimes
+        15 | 16 | 124 | 123 | 34 | 35 | 95 | 408 | 131 | 138 | 139 => ok(0), // chmod, chown, fchmod, fchown, chflags, fchflags, fsync, flock, utimes, futimes
         20 => ok(1),        // getpid: we are the only process
         24 | 25 => ok(501), // getuid, geteuid: mobile
         43 | 47 => ok(501), // getegid, getgid
@@ -399,7 +399,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         75 => ok(0), // madvise
         89 => ok(256),
-        92 | 404 => {
+        92 | 406 => {
             let (fd, cmd) = (args[0], args[1]);
             if !k.vfs.fds.contains_key(&fd) {
                 return Ret::Err(vfs::EBADF);
@@ -428,7 +428,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             }
             Ret::Ok((us / 1_000_000) as u32, (us % 1_000_000) as u32)
         }
-        121 => {
+        121 | 412 => {
             let (fd, iov, cnt) = (args[0], args[1], args[2]);
             let mut data = Vec::new();
             for i in 0..cnt {
@@ -446,11 +446,11 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         136 => res(k.vfs.mkdir(&k.fw, &k.path_arg(0)).map(|_| 0)),
         137 => res(k.vfs.unlink(&k.fw, &k.path_arg(0)).map(|_| 0)),
-        153 | 413 => {
+        153 | 414 => {
             let off = args[3] as u64 | (args[4] as u64) << 32;
             k.do_read(args[0], args[1], args[2], Some(off))
         }
-        154 => {
+        154 | 415 => {
             let off = args[3] as u64 | (args[4] as u64) << 32;
             let data = read_bytes(&k.mem, args[1], args[2]);
             res(k.vfs.write(args[0], &data, Some(off)).map(|n| n as u32))

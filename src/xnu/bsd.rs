@@ -563,7 +563,11 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         327 => ok(0), // issetugid
         336 => Ret::Err(ENOTSUP),
-        372 => ok(k.threads[k.current].id + 100), // thread_selfid
+        // thread_selfid
+        372 => {
+            let tid = k.threads[k.current].tid + 100;
+            Ret::Ok(tid as u32, (tid >> 32) as u32)
+        }
         _ => super::mach::bsd_extra(k, num).unwrap_or_else(|| {
             log!(
                 "xnu: unimplemented syscall {num} (r0-r3 {:#x} {:#x} {:#x} {:#x}, lr {:#x})",

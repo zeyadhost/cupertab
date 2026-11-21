@@ -79,6 +79,8 @@ pub enum Block {
 
 pub struct Thread {
     pub id: u32,
+    /// thread_selfid: unique for the task's lifetime, unlike `id`.
+    pub tid: u64,
     pub port: u32,
     context: Option<Box<CpuContext>>,
     tls: u32,
@@ -102,6 +104,7 @@ pub struct Kernel {
     pub trace: bool,
     /// Set by thread_switch/swtch so another thread runs next.
     pub yield_requested: bool,
+    next_tid: u64,
 }
 
 impl Kernel {
@@ -164,6 +167,7 @@ impl Kernel {
             ipc,
             threads: vec![Thread {
                 id: 0,
+                tid: 0,
                 port: thread_port,
                 context: None,
                 tls: 0,
@@ -177,6 +181,7 @@ impl Kernel {
             pthread_size: 0,
             trace: std::env::var_os("TOUCHHLE_XNU_TRACE").is_some(),
             yield_requested: false,
+            next_tid: 1,
         })
     }
 
@@ -293,8 +298,11 @@ impl Kernel {
         self.cpu
             .set_cpsr(Cpu::CPSR_USER_MODE | if pc & 1 != 0 { Cpu::CPSR_THUMB } else { 0 });
         self.cpu.swap_context(&mut ctx);
+        let tid = self.next_tid;
+        self.next_tid += 1;
         let thread = Thread {
             id,
+            tid,
             port,
             context: Some(ctx),
             tls,

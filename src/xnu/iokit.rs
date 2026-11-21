@@ -127,7 +127,9 @@ impl Registry {
         // Only the device tree plane is modelled as a hierarchy. In the other
         // planes, find a service by its own name, the path's last component.
         if plane != "IODeviceTree" {
-            let last = rest.rsplit('/').find(|c| !c.is_empty())?;
+            let Some(last) = rest.rsplit('/').find(|c| !c.is_empty()) else {
+                return Some(0);
+            };
             return self.entries.iter().position(|e| e.name == last);
         }
         let mut cur = 0;

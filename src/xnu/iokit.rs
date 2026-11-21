@@ -674,6 +674,7 @@ fn mbx_method(k: &mut Kernel, selector: u32, scalars: &[u64]) -> Option<(Vec<u64
                         .collect();
                     echo!("xnu:   MBX commands ({used} bytes): {words:x?}");
                 }
+                run_mbx_commands(k, header + 0x1000, used.min(CAPACITY));
                 write_u32(&mut k.mem, header + 4, 0);
             }
             (vec![header as u64], Vec::new())
@@ -692,6 +693,49 @@ fn mbx_method(k: &mut Kernel, selector: u32, scalars: &[u64]) -> Option<(Vec<u64
         }
         _ => return None,
     })
+}
+
+/// Runs the 2D packets MBX2D wrote: each is a byte length followed by that
+/// many bytes. Only solid fills (raster op 0xF0, pattern copy) are drawn so
+/// far; their words are the packet type 4, flags, the destination surface,
+/// addresses, the format, the raster op, the ARGB color and the corners as
+/// `x << 16 | y`.
+fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
+    let mut at = start;
+    let end = start + len;
+    while at + 4 <= end {
+        let n = read_u32(&k.mem, at);
+        if n == 0 || !n.is_multiple_of(4) || at + 4 + n > end {
+            break;
+        }
+        let w: Vec<u32> = (1..=n / 4).map(|i| read_u32(&k.mem, at + 4 * i)).collect();
+        if w.len() >= 15 && w[0] == 4 && w[11] & 0xff == 0xf0 {
+            let corner = |v: u32| (v >> 16, v & 0xffff);
+            mbx_fill(k, w[4], w[12], corner(w[13]), corner(w[14]));
+        }
+        at += 4 + n;
+    }
+}
+
+fn mbx_fill(k: &mut Kernel, id: u32, color: u32, (x0, y0): (u32, u32), (x1, y1): (u32, u32)) {
+    let Some(s) = id
+        .checked_sub(1)
+        .and_then(|i| k.iokit.surfaces.get(i as usize))
+    else {
+        return;
+    };
+    if s.bytes_per_element != 4 {
+        return;
+    }
+    let (x1, y1) = (x1.min(s.width), y1.min(s.height));
+    if x0 >= x1 {
+        return;
+    }
+    let row: Vec<u8> = (x0..x1).flat_map(|_| color.to_le_bytes()).collect();
+    let (addr, bytes_per_row) = (s.addr, s.bytes_per_row);
+    for y in y0..y1 {
+        write_bytes(&mut k.mem, addr + y * bytes_per_row + x0 * 4, &row);
+    }
 }
 
 fn surface_method(

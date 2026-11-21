@@ -68,7 +68,9 @@ impl VSync {
     pub fn message(&self, time: u64) -> Vec<u8> {
         const OS_NOTIFICATION_MESSAGE_ID: u32 = 53;
         const ASYNC_COMPLETION_TYPE: u32 = 150;
-        let mut words = vec![0, 92, self.port, 0, 0, OS_NOTIFICATION_MESSAGE_ID];
+        // The receiver sees a null remote port: IOKitLib skips the callout
+        // when a remote port is set and it can't count its send rights.
+        let mut words = vec![0, 92, 0, self.port, 0, OS_NOTIFICATION_MESSAGE_ID];
         words.extend([4 + 6 * 4, ASYNC_COMPLETION_TYPE]);
         words.extend([self.port, self.callback, self.refcon, 0, 0, 0, 0, 0]);
         words.extend([0, time as u32, (time >> 32) as u32, 0, 0, 0, 0]);
@@ -365,6 +367,12 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             let scalar_out_max = le(msg, tail + 8) as usize;
             let inband_out_max = le(msg, tail + 12) as usize;
             let class = k.iokit.entries[e].class.clone();
+            if k.trace {
+                echo!(
+                    "xnu:   {class} selector {selector} {scalars:x?} inband {}",
+                    inband.len()
+                );
+            }
             let result = if class.ends_with("CLCD") {
                 framebuffer_method(k, le(msg, 8), selector, &scalars, inband)
             } else if class == "IOCoreSurfaceRoot" {

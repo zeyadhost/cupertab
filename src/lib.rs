@@ -30,6 +30,7 @@ mod log;
 mod abi;
 mod audio;
 mod bundle;
+mod coroutine;
 mod cpu;
 mod debug;
 mod dyld;
@@ -367,4 +368,42 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     };
     env.run();
     Ok(())
+}
+
+/// Sleep the current thread. On the web this yields to the browser's event
+/// loop instead of busy-waiting.
+pub(crate) fn sleep(duration: std::time::Duration) {
+    #[cfg(target_os = "emscripten")]
+    {
+        extern "C" {
+            fn emscripten_sleep(ms: std::ffi::c_uint);
+        }
+        unsafe { emscripten_sleep(duration.as_millis().min(u32::MAX as u128) as std::ffi::c_uint) }
+    }
+    #[cfg(not(target_os = "emscripten"))]
+    std::thread::sleep(duration);
+}
+
+/// On the web, give the browser's event loop a chance to run (to present
+/// frames and deliver input). With `force == false` this only yields if a
+/// while has passed since the last yield. No-op natively.
+#[allow(unused_variables)]
+pub(crate) fn web_yield(force: bool) {
+    #[cfg(target_os = "emscripten")]
+    {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        thread_local! {
+            static LAST_YIELD: Cell<Option<Instant>> = const { Cell::new(None) };
+        }
+        let now = Instant::now();
+        let due = LAST_YIELD.with(|l| {
+            l.get()
+                .is_none_or(|t| now.duration_since(t) > Duration::from_millis(50))
+        });
+        if force || due {
+            sleep(Duration::ZERO);
+            LAST_YIELD.with(|l| l.set(Some(Instant::now())));
+        }
+    }
 }

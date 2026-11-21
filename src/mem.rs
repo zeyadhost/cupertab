@@ -207,7 +207,31 @@ unsafe impl<T, const MUT: bool> SafeRead for Ptr<T, MUT> {}
 pub trait SafeWrite: Sized {}
 impl<T: SafeRead> SafeWrite for T {}
 
+#[cfg(not(target_os = "emscripten"))]
 type Bytes = [u8; 1 << 32];
+/// WebAssembly can't reserve a 4GiB guest address space alongside the host
+/// heap, so guest addresses are folded into a smaller window: the bottom of
+/// the address space (binaries, heap) and the top 16MiB (main thread stack)
+/// share it, and the VM allocator never hands out addresses that would alias.
+#[cfg(target_os = "emscripten")]
+const WINDOW_SIZE: usize = 1 << 30;
+#[cfg(target_os = "emscripten")]
+type Bytes = [u8; WINDOW_SIZE];
+#[cfg(target_os = "emscripten")]
+const WINDOW_TOP_RESERVED: VAddr = 16 * 1024 * 1024;
+
+/// Index into [Bytes] for a guest address.
+#[inline(always)]
+fn host_index(addr: VAddr) -> usize {
+    #[cfg(target_os = "emscripten")]
+    {
+        (addr as usize) & (WINDOW_SIZE - 1)
+    }
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        addr as usize
+    }
+}
 
 pub const PAGE_SIZE: GuestUSize = 4096;
 pub const PAGE_SIZE_ALIGN_MASK: GuestUSize = 0xfff;
@@ -291,7 +315,10 @@ impl Mem {
 
         let bytes = ptr as *mut Bytes;
 
+        #[cfg(not(target_os = "emscripten"))]
         let vm_allocator = VMAllocator::new(0, Self::MAIN_THREAD_STACK_LOW_END);
+        #[cfg(target_os = "emscripten")]
+        let vm_allocator = VMAllocator::new(0, (WINDOW_SIZE as VAddr) - WINDOW_TOP_RESERVED);
 
         Mem {
             bytes,
@@ -329,6 +356,7 @@ impl Mem {
         self.null_segment_size = new_null_segment_size;
     }
 
+    #[cfg_attr(not(feature = "dynarmic"), allow(dead_code))]
     pub fn null_segment_size(&self) -> VAddr {
         self.null_segment_size
     }
@@ -339,6 +367,7 @@ impl Mem {
     /// Safety: You must ensure that this pointer does not outlive the instance
     /// of [Mem]. You must not use it while a `&mut` is held on some region of
     /// guest memory.
+    #[cfg_attr(not(feature = "dynarmic"), allow(dead_code))]
     pub unsafe fn direct_memory_access_ptr(&mut self) -> *mut std::ffi::c_void {
         self.bytes.cast()
     }
@@ -357,6 +386,40 @@ impl Mem {
         panic!("Attempted null-page access at {at:#x} ({size:#x} bytes)")
     }
 
+    /// Read `N` bytes for the CPU interpreter. Returns [None] on a null-page
+    /// or out-of-range access instead of panicking.
+    #[cfg_attr(feature = "dynarmic", allow(dead_code))]
+    #[inline(always)]
+    pub fn cpu_read<const N: usize>(&self, addr: VAddr) -> Option<[u8; N]> {
+        if addr < self.null_segment_size {
+            return None;
+        }
+        let addr = host_index(addr);
+        self.bytes()
+            .get(addr..addr.checked_add(N)?)
+            .map(|s| s.try_into().unwrap())
+    }
+    /// Write `N` bytes for the CPU interpreter. Returns `false` on a
+    /// null-page or out-of-range access instead of panicking.
+    #[cfg_attr(feature = "dynarmic", allow(dead_code))]
+    #[inline(always)]
+    pub fn cpu_write<const N: usize>(&mut self, addr: VAddr, value: [u8; N]) -> bool {
+        if addr < self.null_segment_size {
+            return false;
+        }
+        let addr = host_index(addr);
+        let Some(end) = addr.checked_add(N) else {
+            return false;
+        };
+        match self.bytes_mut().get_mut(addr..end) {
+            Some(s) => {
+                s.copy_from_slice(&value);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Special version of [Self::bytes_at] that returns [None] rather than
     /// panicking on failure. Only for use by [crate::gdb::GdbServer].
     pub fn get_bytes_fallible(&self, addr: ConstVoidPtr, count: GuestUSize) -> Option<&[u8]> {
@@ -364,7 +427,7 @@ impl Mem {
             return None;
         }
         self.bytes()
-            .get(addr.to_bits() as usize..)?
+            .get(host_index(addr.to_bits())..)?
             .get(..count as usize)
     }
     /// Special version of [Self::bytes_at_mut] that returns [None] rather than
@@ -378,7 +441,7 @@ impl Mem {
             return None;
         }
         self.bytes_mut()
-            .get_mut(addr.to_bits() as usize..)?
+            .get_mut(host_index(addr.to_bits())..)?
             .get_mut(..count as usize)
     }
 
@@ -393,7 +456,7 @@ impl Mem {
         if ptr.to_bits() < self.null_segment_size {
             Self::null_check_fail(ptr.to_bits(), count)
         }
-        &self.bytes()[ptr.to_bits() as usize..][..count as usize]
+        &self.bytes()[host_index(ptr.to_bits())..][..count as usize]
     }
     /// Get a slice for reading `count` bytes without a null-page check.
     ///
@@ -405,7 +468,7 @@ impl Mem {
         ptr: Ptr<u8, MUT>,
         count: GuestUSize,
     ) -> &[u8] {
-        &self.bytes()[ptr.to_bits() as usize..][..count as usize]
+        &self.bytes()[host_index(ptr.to_bits())..][..count as usize]
     }
     /// Get a slice for reading or writing `count` bytes. This is the basic
     /// primitive for safe read-write memory access.
@@ -418,7 +481,7 @@ impl Mem {
         if ptr.to_bits() < self.null_segment_size {
             Self::null_check_fail(ptr.to_bits(), count)
         }
-        &mut self.bytes_mut()[ptr.to_bits() as usize..][..count as usize]
+        &mut self.bytes_mut()[host_index(ptr.to_bits())..][..count as usize]
     }
 
     /// Get a pointer for reading an array of `count` elements of type `T`.
@@ -484,6 +547,13 @@ impl Mem {
         let guest_mem_range = self.bytes().as_ptr_range();
         assert!(guest_mem_range.contains(&host_ptr));
         let guest_addr = host_ptr as usize - guest_mem_range.start as usize;
+        // Undo host_index()'s folding of the main thread stack.
+        #[cfg(target_os = "emscripten")]
+        let guest_addr = if guest_addr >= WINDOW_SIZE - WINDOW_TOP_RESERVED as usize {
+            (guest_addr as u64 + (1u64 << 32) - WINDOW_SIZE as u64) as usize
+        } else {
+            guest_addr
+        };
         Ptr::from_bits(u32::try_from(guest_addr).unwrap())
     }
 
@@ -516,8 +586,8 @@ impl Mem {
 
     /// C-style `memmove`.
     pub fn memmove(&mut self, dest: MutVoidPtr, src: ConstVoidPtr, size: GuestUSize) {
-        let src = src.to_bits() as usize;
-        let dest = dest.to_bits() as usize;
+        let src = host_index(src.to_bits());
+        let dest = host_index(dest.to_bits());
         let size = size as usize;
         self.bytes_mut()
             .copy_within(src..src.checked_add(size).unwrap(), dest)
@@ -726,6 +796,11 @@ impl Mem {
     /// Permanently mark a region of address space as being unusable to the
     /// memory allocator.
     pub fn reserve(&mut self, base: VAddr, size: GuestUSize) {
+        #[cfg(target_os = "emscripten")]
+        assert!(
+            base as u64 + size as u64 <= (WINDOW_SIZE as u64) - WINDOW_TOP_RESERVED as u64,
+            "Region {base:#x}+{size:#x} does not fit in the WebAssembly guest memory window"
+        );
         self.vm_allocator.allocate(Some(base), size).unwrap();
     }
 

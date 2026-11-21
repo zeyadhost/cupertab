@@ -590,6 +590,7 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     let mut texture: GLuint = 0;
     gles.GenTextures(1, &mut texture);
     gles.BindTexture(gles11::TEXTURE_2D, texture);
+    #[cfg(not(target_os = "emscripten"))]
     gles.CopyTexImage2D(
         gles11::TEXTURE_2D,
         0,
@@ -600,6 +601,32 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
         height,
         0,
     );
+    // gl4es's glCopyTexImage2D() doesn't read from renderbuffers on WebGL,
+    // so read the pixels back and upload them instead.
+    #[cfg(target_os = "emscripten")]
+    {
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        gles.ReadPixels(
+            0,
+            0,
+            width,
+            height,
+            gles11::RGBA,
+            gles11::UNSIGNED_BYTE,
+            pixels.as_mut_ptr() as *mut _,
+        );
+        gles.TexImage2D(
+            gles11::TEXTURE_2D,
+            0,
+            gles11::RGBA as _,
+            width,
+            height,
+            0,
+            gles11::RGBA,
+            gles11::UNSIGNED_BYTE,
+            pixels.as_ptr() as *const _,
+        );
+    }
     // The texture will not have any mip levels so we must ensure the filter
     // does not use them, else rendering will fail.
     gles.TexParameteri(
@@ -653,14 +680,23 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     let old_clear_color: [GLfloat; 4] = get_floats(gles, gles11::COLOR_CLEAR_VALUE);
     let old_array_buffer: GLuint = get_int(gles, gles11::ARRAY_BUFFER_BINDING) as _;
     let old_vertex_array_binding: GLuint = get_int(gles, gles11::VERTEX_ARRAY_BUFFER_BINDING) as _;
-    let old_vertex_array_size: GLint = get_int(gles, gles11::VERTEX_ARRAY_SIZE);
-    let old_vertex_array_type: GLenum = get_int(gles, gles11::VERTEX_ARRAY_TYPE) as _;
+    // gl4es reports 0 for the pointer size and type until a pointer is set;
+    // GL's initial values are 4 and FLOAT.
+    let valid_size = |size: GLint| if (2..=4).contains(&size) { size } else { 4 };
+    let valid_type = |type_: GLenum| match type_ {
+        gles11::BYTE | gles11::SHORT | gles11::FLOAT | gles11::FIXED => type_,
+        _ => gles11::FLOAT,
+    };
+    let old_vertex_array_size: GLint = valid_size(get_int(gles, gles11::VERTEX_ARRAY_SIZE));
+    let old_vertex_array_type: GLenum = valid_type(get_int(gles, gles11::VERTEX_ARRAY_TYPE) as _);
     let old_vertex_array_stride: GLsizei = get_int(gles, gles11::VERTEX_ARRAY_STRIDE) as _;
     let old_vertex_array_pointer = get_ptr(gles, gles11::VERTEX_ARRAY_POINTER);
     let old_tex_coord_array_binding: GLuint =
         get_int(gles, gles11::TEXTURE_COORD_ARRAY_BUFFER_BINDING) as _;
-    let old_tex_coord_array_size: GLint = get_int(gles, gles11::TEXTURE_COORD_ARRAY_SIZE);
-    let old_tex_coord_array_type: GLenum = get_int(gles, gles11::TEXTURE_COORD_ARRAY_TYPE) as _;
+    let old_tex_coord_array_size: GLint =
+        valid_size(get_int(gles, gles11::TEXTURE_COORD_ARRAY_SIZE));
+    let old_tex_coord_array_type: GLenum =
+        valid_type(get_int(gles, gles11::TEXTURE_COORD_ARRAY_TYPE) as _);
     let old_tex_coord_array_stride: GLsizei =
         get_int(gles, gles11::TEXTURE_COORD_ARRAY_STRIDE) as _;
     let old_tex_coord_array_pointer = get_ptr(gles, gles11::TEXTURE_COORD_ARRAY_POINTER);

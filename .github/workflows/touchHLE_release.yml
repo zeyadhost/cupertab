@@ -22,7 +22,7 @@ jobs:
         shell: bash # windows :)
         run: |
           mkdir -p "$GITHUB_WORKSPACE"
-          git clone https://github.com/touchHLE/touchHLE "$GITHUB_WORKSPACE"
+          git clone "${{ github.server_url }}/${{ github.repository }}" "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
           git fetch origin "$GITHUB_REF"
           git checkout "$GITHUB_SHA" # avoid race condition if branch/tag changes
@@ -102,7 +102,7 @@ jobs:
       shell: bash # windows :)
       run: |
         mkdir -p "$GITHUB_WORKSPACE"
-        git clone https://github.com/touchHLE/touchHLE "$GITHUB_WORKSPACE"
+        git clone "${{ github.server_url }}/${{ github.repository }}" "$GITHUB_WORKSPACE"
         cd "$GITHUB_WORKSPACE"
         git fetch origin "$GITHUB_REF"
         git checkout "$GITHUB_SHA" # avoid race condition if branch/tag changes
@@ -163,7 +163,7 @@ jobs:
       run: curl -L -o android-ndk-r25c-linux.zip "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip"
     - if: ${{ steps.cache-android-ndk.outputs.cache-hit != 'true' }}
       name: Extract Android NDK
-      run: 7z -oandroid-ndk -snld x android-ndk-r25c-linux.zip
+      run: 7z -oandroid-ndk -snld20 x android-ndk-r25c-linux.zip
     - name: Link Android NDK
       run: ln -s $PWD'/android-ndk/android-ndk-r25c' $ANDROID_SDK_ROOT'/ndk/25.2.9519653'
     # Why isn't there a command for this?
@@ -172,14 +172,25 @@ jobs:
     - name: Lint
       run: dev-scripts/lint.sh ndk -t arm64-v8a
       env:
+        # The host build for `cargo doc` uses GCC 15 on ubuntu-latest: SDL2
+        # doesn't build as C23 (its default) and openal-soft needs <cstdint>.
+        CFLAGS: '-std=gnu17'
+        CXXFLAGS: '-include cstdint'
         # The version should match the ndkVersion defined in `android\app\build.gradle`
         ANDROID_NDK_ROOT: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
         ANDROID_NDK: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
         ANDROID_NDK_HOME: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
         CMAKE: ${{ github.workspace }}/vendor/cmake/bin/cmake
+    # Gradle 8.11 can't run on the runner's default JDK 25.
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
     # Don't attempt to run tests (can't run on Android).
     - name: Build for Android
-      run: cd android && ../gradle/gradle-8.11.1/bin/gradle assembleRelease && mv app/build/outputs/apk/release/app-release.apk ../touchHLE.apk
+      # sdl2-sys's build script copies its libraries into deps/, which newer
+      # Cargo no longer creates before running build scripts.
+      run: mkdir -p target/aarch64-linux-android/release/deps && cd android && ../gradle/gradle-8.11.1/bin/gradle assembleRelease && mv app/build/outputs/apk/release/app-release.apk ../touchHLE.apk
       env:
         # The version should match the ndkVersion defined in `android\app\build.gradle`
         ANDROID_NDK_ROOT: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
@@ -200,7 +211,7 @@ jobs:
       shell: bash # windows :)
       run: |
         mkdir -p "$GITHUB_WORKSPACE"
-        git clone https://github.com/touchHLE/touchHLE "$GITHUB_WORKSPACE"
+        git clone "${{ github.server_url }}/${{ github.repository }}" "$GITHUB_WORKSPACE"
         cd "$GITHUB_WORKSPACE"
         git fetch origin "$GITHUB_REF"
         git checkout "$GITHUB_SHA" # avoid race condition if branch/tag changes

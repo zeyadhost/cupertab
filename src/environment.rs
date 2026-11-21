@@ -646,12 +646,14 @@ impl Environment {
                     panic!("Main function exited unexpectedly!");
                 })
             }));
-            if let Err(e) = res {
-                let panic_cell = env.panic_cell.clone();
-                panic_cell.set(Some(env));
-                std::panic::resume_unwind(e);
+            match res {
+                Ok(never) => never,
+                Err(e) => {
+                    let panic_cell = env.panic_cell.clone();
+                    panic_cell.set(Some(env));
+                    std::panic::resume_unwind(e);
+                }
             }
-            env
         });
         let main_thread = Thread {
             state: ThreadState::Running,

@@ -1305,6 +1305,12 @@ impl Window {
         gl_ins
     }
 
+    /// Shows an RGBA image filling the screen, like the splash image.
+    pub fn display_image(&mut self, image: Image) {
+        self.splash_image = Some(image);
+        self.display_splash();
+    }
+
     fn display_splash(&mut self) {
         assert!(self.splash_image.is_some());
 

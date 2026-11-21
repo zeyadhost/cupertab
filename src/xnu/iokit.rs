@@ -365,6 +365,9 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             let scalar_out_max = le(msg, tail + 8) as usize;
             let inband_out_max = le(msg, tail + 12) as usize;
             let class = k.iokit.entries[e].class.clone();
+            if k.trace {
+                echo!("xnu:   {class} selector {selector} {scalars:x?} inband {}", inband.len());
+            }
             let result = if class.ends_with("CLCD") {
                 framebuffer_method(k, le(msg, 8), selector, &scalars, inband)
             } else if class == "IOCoreSurfaceRoot" {

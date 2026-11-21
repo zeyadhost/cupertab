@@ -349,8 +349,12 @@ impl Vfs {
             }
             FileKind::Null | FileKind::Console => 0,
             FileKind::Random => {
-                for (i, b) in buf.iter_mut().enumerate() {
-                    *b = (pos as usize + i).wrapping_mul(2654435761) as u8 ^ 0x5a;
+                use std::hash::{BuildHasher, Hasher};
+                for chunk in buf.chunks_mut(8) {
+                    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+                    h.write_u64(pos);
+                    let n = chunk.len();
+                    chunk.copy_from_slice(&h.finish().to_le_bytes()[..n]);
                 }
                 buf.len()
             }

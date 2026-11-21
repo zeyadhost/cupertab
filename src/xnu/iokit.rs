@@ -14,6 +14,7 @@ use super::{write_bytes, Kernel};
 use crate::firmware::IpswInfo;
 
 const KIO_RETURN_NOT_FOUND: u32 = 0xe00002f0;
+const KIO_RETURN_UNSUPPORTED: u32 = 0xe00002c7;
 
 pub enum Prop {
     Data(Vec<u8>),
@@ -28,9 +29,13 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Every entry is an `IOService`, which is an `IORegistryEntry`.
+    /// Every entry is an `IOService`, which is an `IORegistryEntry`, and the
+    /// LCD controllers are `IOMobileFramebuffer`s.
     pub fn conforms_to(&self, class: &str) -> bool {
-        self.class == class || class == "IOService" || class == "IORegistryEntry"
+        self.class == class
+            || class == "IOService"
+            || class == "IORegistryEntry"
+            || (class == "IOMobileFramebuffer" && self.class.ends_with("CLCD"))
     }
 }
 
@@ -71,6 +76,13 @@ impl Registry {
                 ("serial-number", strings(&["TOUCHHLE000"])),
             ],
         );
+        // The LCD controller each SoC family has.
+        let clcd = match info.platform.as_str() {
+            "s5l8900x" => "AppleH1CLCD",
+            "s5l8720x" | "s5l8920x" => "AppleM2CLCD",
+            _ => "AppleCLCD",
+        };
+        r.add(Some(root), "clcd", clcd, vec![("name", strings(&["clcd"]))]);
         r.add(
             Some(root),
             "chosen",
@@ -236,6 +248,57 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
                 None => err(KIO_RETURN_NOT_FOUND),
             }
         }
+        // io_service_open_extended(service, owning_task, connect_type, ndr,
+        // properties): the reply carries the connection port, then the result.
+        (2862, KObject::IoEntry(e)) => {
+            let conn = k.ipc.new_kernel_port(KObject::IoConnect(e));
+            Some(reply(
+                msg,
+                &[KERN_SUCCESS],
+                &[(conn, MACH_MSG_TYPE_PORT_SEND)],
+            ))
+        }
+        // io_connect_method(connection, selector, scalar_input, inband_input,
+        // ool_input, ool_input_size, scalar_outputCnt, inband_outputCnt,
+        // ool_output, ool_output_size)
+        (2865, KObject::IoConnect(e)) => {
+            let selector = le(msg, ARGS);
+            let n = (le(msg, ARGS + 4) as usize).min(16);
+            let scalars: Vec<u64> = (0..n)
+                .map(|i| {
+                    le(msg, ARGS + 8 + 8 * i) as u64 | (le(msg, ARGS + 12 + 8 * i) as u64) << 32
+                })
+                .collect();
+            let inband_at = ARGS + 8 + 8 * n;
+            let inband_len = le(msg, inband_at) as usize;
+            let inband = &msg[inband_at + 4..][..inband_len];
+            let tail = inband_at + 4 + inband_len.div_ceil(4) * 4;
+            let scalar_out_max = le(msg, tail + 8) as usize;
+            let inband_out_max = le(msg, tail + 12) as usize;
+            let class = k.iokit.entries[e].class.clone();
+            let result = if class.ends_with("CLCD") {
+                framebuffer_method(k, selector, &scalars, inband)
+            } else {
+                None
+            };
+            let Some((scalar_out, inband_out)) = result else {
+                log!("xnu: {class} user client: unhandled selector {selector} {scalars:x?}");
+                return err(KIO_RETURN_UNSUPPORTED);
+            };
+            let mut body = vec![KERN_SUCCESS, scalar_out_max.min(scalar_out.len()) as u32];
+            for &v in scalar_out.iter().take(scalar_out_max) {
+                body.extend([v as u32, (v >> 32) as u32]);
+            }
+            let mut bytes = inband_out;
+            bytes.truncate(inband_out_max);
+            body.push(bytes.len() as u32);
+            bytes.resize(bytes.len().div_ceil(4) * 4, 0);
+            body.extend(bytes.chunks(4).map(|c| le(c, 0)));
+            body.push(0); // ool_output_size
+            Some(reply(msg, &body, &[]))
+        }
+        // io_connect_set_notification_port(connection, type, port, reference)
+        (2818, KObject::IoConnect(_)) => err(KERN_SUCCESS),
         // io_registry_get_root_entry(master)
         (2827, KObject::IoMaster) => port_reply(k.ipc.new_kernel_port(KObject::IoEntry(0))),
         // io_iterator_next(iterator)
@@ -353,5 +416,43 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             port_reply(it)
         }
         _ => None,
+    }
+}
+
+/// `IOMobileFramebuffer` user client selectors, answered for a display of the
+/// device's size. Returns scalar and struct outputs.
+fn framebuffer_method(
+    k: &mut Kernel,
+    selector: u32,
+    _scalars: &[u64],
+    _inband: &[u8],
+) -> Option<(Vec<u64>, Vec<u8>)> {
+    let (w, h) = display_size(&k.fw.info.product_type);
+    Some(match selector {
+        // Display size in pixels.
+        8 => (vec![w as u64, h as u64], Vec::new()),
+        // Gamma table: three 256-entry ramps of 32-bit values.
+        27 => {
+            let mut t = Vec::with_capacity(3 * 256 * 4);
+            for _ in 0..3 {
+                for i in 0..256u32 {
+                    t.extend((i * 0x101).to_le_bytes());
+                }
+            }
+            (Vec::new(), t)
+        }
+        3 | 4 | 5 | 7 | 12 | 15 | 17 | 19 | 22 | 33 => (vec![0], Vec::new()),
+        _ => return None,
+    })
+}
+
+/// The panel size of a device, by product type.
+pub fn display_size(product_type: &str) -> (u32, u32) {
+    if product_type.starts_with("iPhone3,") || product_type.starts_with("iPod4,") {
+        (640, 960)
+    } else if product_type.starts_with("iPad") {
+        (768, 1024)
+    } else {
+        (320, 480)
     }
 }

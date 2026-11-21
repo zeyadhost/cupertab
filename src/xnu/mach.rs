@@ -41,6 +41,8 @@ pub enum KObject {
         items: Vec<usize>,
         pos: usize,
     },
+    /// A user client connection to an I/O Registry entry.
+    IoConnect(usize),
 }
 
 #[derive(Debug, Default)]
@@ -225,7 +227,10 @@ impl Kernel {
         let r = |kr: u32| Some(reply(msg, &[kr], &[]));
         if matches!(
             obj,
-            KObject::IoMaster | KObject::IoEntry(_) | KObject::IoIterator { .. }
+            KObject::IoMaster
+                | KObject::IoEntry(_)
+                | KObject::IoIterator { .. }
+                | KObject::IoConnect(_)
         ) {
             let rep = super::iokit::msg(self, obj.clone(), msg);
             if rep.is_none() {
@@ -243,6 +248,22 @@ impl Kernel {
                     self.ipc.ports.get_mut(&name).unwrap().is_set = true;
                 }
                 Some(reply(msg, &[KERN_SUCCESS, name], &[]))
+            }
+            // mach_port_type(task, name): kernel objects are held as send
+            // rights, ports the task allocated as receive and send rights.
+            3201 => {
+                const KERN_INVALID_NAME: u32 = 15;
+                const TYPE_SEND: u32 = 1 << 16;
+                const TYPE_RECEIVE: u32 = 1 << 17;
+                const TYPE_PORT_SET: u32 = 1 << 19;
+                match self.ipc.ports.get(&arg(0)) {
+                    Some(p) if p.is_set => Some(reply(msg, &[KERN_SUCCESS, TYPE_PORT_SET], &[])),
+                    Some(p) if p.kobject.is_some() => {
+                        Some(reply(msg, &[KERN_SUCCESS, TYPE_SEND], &[]))
+                    }
+                    Some(_) => Some(reply(msg, &[KERN_SUCCESS, TYPE_SEND | TYPE_RECEIVE], &[])),
+                    None => r(KERN_INVALID_NAME),
+                }
             }
             // mach_port_destroy, mach_port_deallocate
             3205 | 3206 => r(KERN_SUCCESS),

@@ -394,6 +394,13 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             }
         }
         105 => ok(0), // setsockopt
+        362 => ok(k.vfs.alloc_fd(OpenFile {
+            kind: FileKind::Kqueue(Default::default()),
+            offset: 0,
+            path: String::new(),
+            flags: 2,
+        })),
+        363 => kevent(k, &args),
         // select(nfds, readfds, writefds, errorfds, timeout): never blocks.
         // A socket is readable once its service has replied; other
         // descriptors are always ready.
@@ -660,4 +667,98 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             Ret::Err(ENOSYS)
         }),
     }
+}
+
+/// kevent(kq, changelist, nchanges, eventlist, nevents, timeout).
+///
+/// Only `EVFILT_USER` events are tracked; other registrations are accepted
+/// and never fire. `EV_RECEIPT` changes are echoed back at once, as libdispatch
+/// expects. With nothing to report, the thread sleeps for at most 10ms (or
+/// the timeout if shorter) and gets 0 events, so callers poll again for
+/// events triggered meanwhile.
+fn kevent(k: &mut Kernel, args: &[u32; 8]) -> Ret {
+    const EVFILT_USER: i16 = -10;
+    const EV_ADD: u16 = 0x1;
+    const EV_DELETE: u16 = 0x2;
+    const EV_RECEIPT: u16 = 0x40;
+    const EV_ERROR: u16 = 0x4000;
+    const NOTE_TRIGGER: u32 = 0x0100_0000;
+    const NOTE_FFLAGSMASK: u32 = 0x00ff_ffff;
+    const KEVENT_SIZE: u32 = 20;
+
+    let (changes, nchanges, events, nevents) = (args[1], args[2], args[3], args[4]);
+    let mut out: Vec<[u32; 5]> = Vec::new();
+    {
+        let Some(FileKind::Kqueue(kq)) = k.vfs.fds.get_mut(&args[0]).map(|f| &mut f.kind) else {
+            return Ret::Err(vfs::EBADF);
+        };
+        for i in 0..nchanges {
+            let at = changes + i * KEVENT_SIZE;
+            let ident = read_u32(&k.mem, at);
+            let filter_flags = read_u32(&k.mem, at + 4);
+            let (filter, flags) = (filter_flags as u16 as i16, (filter_flags >> 16) as u16);
+            let fflags = read_u32(&k.mem, at + 8);
+            let udata = read_u32(&k.mem, at + 16);
+            if filter == EVFILT_USER {
+                let pos = kq.user.iter().position(|e| e.0 == ident);
+                if flags & EV_DELETE != 0 {
+                    if let Some(p) = pos {
+                        kq.user.remove(p);
+                    }
+                } else {
+                    let p = pos.unwrap_or_else(|| {
+                        kq.user.push((ident, udata, 0, false));
+                        kq.user.len() - 1
+                    });
+                    let e = &mut kq.user[p];
+                    if flags & EV_ADD != 0 {
+                        e.1 = udata;
+                    }
+                    e.2 |= fflags & NOTE_FFLAGSMASK;
+                    e.3 |= fflags & NOTE_TRIGGER != 0;
+                }
+            }
+            if flags & EV_RECEIPT != 0 {
+                out.push([
+                    ident,
+                    filter_flags | (EV_ERROR as u32) << 16,
+                    fflags,
+                    0,
+                    udata,
+                ]);
+            }
+        }
+        if out.is_empty() {
+            for e in kq.user.iter_mut().filter(|e| e.3) {
+                let filter_flags = EVFILT_USER as u16 as u32;
+                out.push([e.0, filter_flags, e.2, 0, e.1]);
+                e.2 = 0;
+                e.3 = false;
+            }
+        }
+    }
+    if !out.is_empty() || nevents == 0 {
+        let n = out.len().min(nevents as usize);
+        for (i, ev) in out.iter().take(n).enumerate() {
+            for (j, w) in ev.iter().enumerate() {
+                write_u32(
+                    &mut k.mem,
+                    events + i as u32 * KEVENT_SIZE + 4 * j as u32,
+                    *w,
+                );
+            }
+        }
+        return ok(n as u32);
+    }
+    let mut wait_ns = 10_000_000;
+    if args[5] != 0 {
+        let ns =
+            read_u32(&k.mem, args[5]) as u64 * 1_000_000_000 + read_u32(&k.mem, args[5] + 4) as u64;
+        wait_ns = wait_ns.min(ns);
+    }
+    let deadline = k.absolute_time() + wait_ns * 3 / 125;
+    let cpsr = k.cpu.cpsr() & !(1 << 29);
+    k.cpu.set_cpsr(cpsr);
+    k.current_thread().blocked = Some(super::Block::Sleep { deadline });
+    Ret::Blocked
 }

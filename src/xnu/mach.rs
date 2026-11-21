@@ -262,9 +262,10 @@ impl Kernel {
                 write_bytes(&mut self.mem, addr, &bytes);
                 let mut m = reply(msg, &[ports.len() as u32], &[(0, 0)]);
                 const MACH_MSG_OOL_PORTS_DESCRIPTOR: u32 = 2;
+                // MACH_MSG_PHYSICAL_COPY. The 32-bit layout is address, count,
+                // then the flag bytes.
                 let flags =
-                    MACH_MSG_OOL_PORTS_DESCRIPTOR << 24 | MACH_MSG_TYPE_PORT_SEND << 16 | 1 << 8; // MACH_MSG_PHYSICAL_COPY
-                                                                                                  // 32-bit layout: address, count, then the flag bytes.
+                    MACH_MSG_OOL_PORTS_DESCRIPTOR << 24 | MACH_MSG_TYPE_PORT_SEND << 16 | 1 << 8;
                 for (o, w) in [(28, addr), (32, ports.len() as u32), (36, flags)] {
                     m[o..o + 4].copy_from_slice(&w.to_le_bytes());
                 }

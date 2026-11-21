@@ -145,7 +145,9 @@ impl<R: ReadAt> UdifImage<R> {
                 self.inner.read_exact_at(&mut compressed, run.offset)?;
                 let mut out = Vec::with_capacity(size);
                 flate2::read::ZlibDecoder::new(&compressed[..]).read_to_end(&mut out)?;
-                out.resize(size, 0);
+                if out.len() != size {
+                    return Err(io::Error::other("UDIF zlib run has the wrong size"));
+                }
                 Ok(out)
             }
             kind => Err(io::Error::other(format!(

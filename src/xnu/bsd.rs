@@ -728,7 +728,7 @@ fn kevent(k: &mut Kernel, args: &[u32; 8]) -> Ret {
                     let e = &mut kq.user[p];
                     if flags & EV_ADD != 0 {
                         e.udata = udata;
-                        e.flags = (e.flags & EV_DISABLE) | (flags & (EV_ONESHOT | EV_CLEAR));
+                        e.flags = flags & (EV_ONESHOT | EV_CLEAR);
                     }
                     if flags & EV_DISABLE != 0 {
                         e.flags |= EV_DISABLE;

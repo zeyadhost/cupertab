@@ -10,7 +10,7 @@
 //! for example SpringBoard finds its `N82AP.plist` from `IODeviceTree:/`.
 
 use super::mach::{le, ool_reply, reply, KObject, KERN_SUCCESS, MACH_MSG_TYPE_PORT_SEND};
-use super::{write_bytes, Kernel};
+use super::{read_u32, write_bytes, write_u32, Kernel};
 use crate::firmware::IpswInfo;
 
 const KIO_RETURN_NOT_FOUND: u32 = 0xe00002f0;
@@ -44,6 +44,8 @@ pub struct Registry {
     pub entries: Vec<Entry>,
     /// Surfaces made through `IOCoreSurfaceRoot`, by ID minus one.
     pub surfaces: Vec<Surface>,
+    /// MBX2D's command buffer, allocated on first use.
+    pub mbx_command_buffer: u32,
     /// Async notification ports set on user clients, by connection port.
     pub notify_ports: std::collections::HashMap<u32, u32>,
     /// Enabled framebuffer vsync callbacks, by connection port.
@@ -108,6 +110,7 @@ impl Registry {
         let mut r = Registry {
             entries: Vec::new(),
             surfaces: Vec::new(),
+            mbx_command_buffer: 0,
             notify_ports: Default::default(),
             vsyncs: Default::default(),
         };
@@ -378,7 +381,7 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             } else if class == "IOCoreSurfaceRoot" {
                 surface_method(k, selector, &scalars, inband)
             } else if class == "AppleMBXDevice" {
-                mbx_method(selector, &scalars)
+                mbx_method(k, selector, &scalars)
             } else {
                 None
             };
@@ -640,14 +643,101 @@ fn surface_info(id: u32, s: &Surface) -> Vec<u8> {
 /// MBX2D opens a device client (type 0), asks it for a token with selector 0,
 /// then opens a shared client (type 1) and passes the token back to selector
 /// 0 there before querying it with selector 2.
-fn mbx_method(selector: u32, scalars: &[u64]) -> Option<(Vec<u64>, Vec<u8>)> {
+///
+/// Selector 2 with an IOSurface ID maps that surface for the GPU. The reply
+/// is a 20-byte struct: the handle MBX2D keys its surface table by, the
+/// surface's address, and (fourth word) a pointer to a status word that
+/// MBX2D sets to 1.
+fn mbx_method(k: &mut Kernel, selector: u32, scalars: &[u64]) -> Option<(Vec<u64>, Vec<u8>)> {
     const SHARED_TOKEN: u64 = 1;
     Some(match (selector, scalars) {
         (0, []) => (vec![SHARED_TOKEN], Vec::new()),
         (0, [SHARED_TOKEN, ..]) => (Vec::new(), Vec::new()),
-        (2, []) => (vec![0], Vec::new()),
+        // The command buffer: a header of capacity, bytes used, an unknown
+        // word and the address of the commands. Selector 3 submits it and
+        // returns the buffer to write next.
+        (2, []) | (3, [_]) => {
+            const CAPACITY: u32 = 0x10000;
+            if k.iokit.mbx_command_buffer == 0 {
+                let header = k.vm_allocate(0, 0x1000 + CAPACITY, 0, 1, "MBX commands")?;
+                for (i, w) in [CAPACITY, 0, 0, header + 0x1000].into_iter().enumerate() {
+                    write_u32(&mut k.mem, header + 4 * i as u32, w);
+                }
+                k.iokit.mbx_command_buffer = header;
+            }
+            let header = k.iokit.mbx_command_buffer;
+            if selector == 3 {
+                let used: u32 = read_u32(&k.mem, header + 4);
+                if k.trace {
+                    let words: Vec<u32> = (0..used.min(0x200) / 4)
+                        .map(|i| read_u32(&k.mem, header + 0x1000 + 4 * i))
+                        .collect();
+                    echo!("xnu:   MBX commands ({used} bytes): {words:x?}");
+                }
+                run_mbx_commands(k, header + 0x1000, used.min(CAPACITY));
+                write_u32(&mut k.mem, header + 4, 0);
+            }
+            (vec![header as u64], Vec::new())
+        }
+        // Unmap a surface.
+        (5, [_]) => (Vec::new(), Vec::new()),
+        (2, [id, _]) => {
+            let id = u32::try_from(*id).ok().filter(|&id| id != 0)?;
+            let addr = k.iokit.surfaces.get(id as usize - 1)?.addr;
+            // The status word lives in the surface's own spare page, after
+            // the seed.
+            let status = k.iokit.surfaces.get(id as usize - 1)?.seed_block + 0x10;
+            let words = [id, addr, 0, status, 0];
+            (
+                Vec::new(),
+                words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            )
+        }
         _ => return None,
     })
+}
+
+/// Runs the 2D packets MBX2D wrote: each is a byte length followed by that
+/// many bytes. Only solid fills (raster op 0xF0, pattern copy) are drawn so
+/// far; their words are the packet type 4, flags, the destination surface,
+/// addresses, the format, the raster op, the ARGB color and the corners as
+/// `x << 16 | y`.
+fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
+    let mut at = start;
+    let end = start + len;
+    while at + 4 <= end {
+        let n = read_u32(&k.mem, at);
+        if n == 0 || !n.is_multiple_of(4) || n > end - at - 4 {
+            break;
+        }
+        let w: Vec<u32> = (1..=n / 4).map(|i| read_u32(&k.mem, at + 4 * i)).collect();
+        if w.len() >= 15 && w[0] == 4 && w[11] & 0xff == 0xf0 {
+            let corner = |v: u32| (v >> 16, v & 0xffff);
+            mbx_fill(k, w[4], w[12], corner(w[13]), corner(w[14]));
+        }
+        at += 4 + n;
+    }
+}
+
+fn mbx_fill(k: &mut Kernel, id: u32, color: u32, (x0, y0): (u32, u32), (x1, y1): (u32, u32)) {
+    let Some(s) = id
+        .checked_sub(1)
+        .and_then(|i| k.iokit.surfaces.get(i as usize))
+    else {
+        return;
+    };
+    if s.bytes_per_element != 4 {
+        return;
+    }
+    let (x1, y1) = (x1.min(s.width), y1.min(s.height));
+    if x0 >= x1 {
+        return;
+    }
+    let row: Vec<u8> = (x0..x1).flat_map(|_| color.to_le_bytes()).collect();
+    let (addr, bytes_per_row) = (s.addr, s.bytes_per_row);
+    for y in y0..y1 {
+        write_bytes(&mut k.mem, addr + y * bytes_per_row + x0 * 4, &row);
+    }
 }
 
 fn surface_method(

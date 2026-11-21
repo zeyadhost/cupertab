@@ -35,6 +35,7 @@ mod cpu;
 mod debug;
 mod dyld;
 mod environment;
+mod firmware;
 mod font;
 mod frameworks;
 mod fs;
@@ -113,6 +114,15 @@ Special options:
 
     --info
         Print basic information about the app bundle without running the app.
+
+    --firmware-info=IPSW
+        Read the iPhone OS root filesystem from an IPSW and print what was
+        found in it. The root filesystem image is extracted to the
+        touchHLE_firmware directory on first use.
+
+    --rootfs-key=KEY
+        Root filesystem key (72 hex digits) to use with --firmware-info, for
+        IPSWs touchHLE does not know the key of.
 ";
 
 pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
@@ -144,6 +154,8 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
 
     let mut bundle_path: Option<PathBuf> = None;
     let mut just_info = false;
+    let mut firmware_info: Option<PathBuf> = None;
+    let mut rootfs_key: Option<String> = None;
     let mut option_args = Vec::new();
     let mut options = options::Options::default();
     let mut app_args = None::<Vec<String>>;
@@ -162,6 +174,10 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             return Ok(());
         } else if arg == "--info" {
             just_info = true;
+        } else if let Some(path) = arg.strip_prefix("--firmware-info=") {
+            firmware_info = Some(PathBuf::from(path));
+        } else if let Some(key) = arg.strip_prefix("--rootfs-key=") {
+            rootfs_key = Some(key.to_string());
         // Parse an option and store a backup in option_args so that we can
         // reapply them after file options are loaded. This ensures that
         // command line options take precedence over file options.
@@ -174,6 +190,10 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             echo!("{}", options::OPTIONS_HELP);
             return Err(format!("Unexpected argument: {arg:?}"));
         }
+    }
+
+    if let Some(ipsw_path) = firmware_info {
+        return firmware::print_info(&ipsw_path, rootfs_key.as_deref());
     }
 
     if options.dumping_options.symbols {

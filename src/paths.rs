@@ -110,6 +110,9 @@ pub const WALLPAPER_FILES: &[&str] = &[
 /// the `Documents` directory.
 pub const SANDBOX_DIR: &str = "touchHLE_sandbox";
 
+/// Root filesystem images extracted from user-provided IPSWs.
+pub const FIRMWARE_DIR: &str = "touchHLE_firmware";
+
 /// Get a platform-specific base path needed for accessing touchHLE's
 /// user-modifiable files. This is empty on platforms other than Android.
 pub fn user_data_base_path() -> Cow<'static, Path> {

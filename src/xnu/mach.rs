@@ -269,8 +269,10 @@ impl Kernel {
             3205 | 3206 => r(KERN_SUCCESS),
             // mach_port_mod_refs(task, name, right, delta)
             3208 => r(KERN_SUCCESS),
-            // mach_port_move_member(task, member, after)
-            3212 => {
+            // mach_port_move_member(task, member, after) and
+            // mach_port_insert_member(task, member, set). A port is in at most
+            // one set here.
+            3212 | 3226 => {
                 let (member, set) = (arg(0), arg(1));
                 if let Some(p) = self.ipc.ports.get_mut(&member) {
                     p.set = if set == 0 { None } else { Some(set) };
@@ -279,6 +281,16 @@ impl Kernel {
             }
             // mach_port_request_notification: there is no previous port
             3213 => Some(reply(msg, &[], &[(0, MACH_MSG_TYPE_PORT_SEND_ONCE)])),
+            // mach_port_extract_member(task, member, set)
+            3227 => {
+                let (member, set) = (arg(0), arg(1));
+                if let Some(p) = self.ipc.ports.get_mut(&member) {
+                    if p.set == Some(set) {
+                        p.set = None;
+                    }
+                }
+                r(KERN_SUCCESS)
+            }
             // mach_port_insert_right, set_attributes and the like
             3214..=3230 => r(KERN_SUCCESS),
             // host_get_io_master
@@ -454,6 +466,9 @@ impl Kernel {
             let mut data = read_bytes(&self.mem, msg, send_size);
             let bits = le(&data, 0);
             let (remote, local) = (le(&data, 8), le(&data, 12));
+            // MIG clients leave msgh_size to the kernel, which sets it from
+            // the send size.
+            data[4..8].copy_from_slice(&send_size.to_le_bytes());
             // Swap remote/local for the receiver's view, as the kernel does.
             data[8..12].copy_from_slice(&local.to_le_bytes());
             data[12..16].copy_from_slice(&remote.to_le_bytes());
@@ -501,6 +516,10 @@ impl Kernel {
             }
         }
         if option & MACH_RCV_MSG != 0 {
+            if self.trace {
+                let set = self.ipc.ports.get(&rcv_name).and_then(|p| p.set);
+                log!("xnu:   mach_msg receive on {rcv_name:#x} (in set {set:x?})");
+            }
             if let Some(kr) = self.try_receive(msg, option, rcv_size, rcv_name) {
                 return Some(kr);
             }
@@ -519,15 +538,17 @@ impl Kernel {
     }
 
     fn try_receive(&mut self, msg: u32, option: u32, rcv_size: u32, name: u32) -> Option<u32> {
-        // MACH_RCV_TRAILER_ELEMENTS: the null, seqno, sender (security token)
-        // and audit trailers. launchd's MIG replies are checked for the audit
-        // one. Every sender is the kernel or this one task, so the tokens are
-        // all zero.
+        // MACH_RCV_TRAILER_ELEMENTS: the null, seqno, sender (security token),
+        // audit, context and MAC trailers. launchd's MIG replies are checked
+        // for the audit one. Every sender is the kernel or this one task, so
+        // the tokens are all zero.
         let trailer_size = match (option >> 24) & 0xf {
             0 => 8,
             1 => 12,
             2 => 20,
-            _ => 52,
+            3 => 52,
+            4 => 56,
+            _ => 64,
         };
         self.fire_timers();
         let candidates: Vec<u32> = match self.ipc.ports.get(&name) {

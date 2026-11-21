@@ -396,7 +396,11 @@ impl Kernel {
         };
         let options = crate::options::Options::default();
         window.poll_for_events(&options);
-        while window.pop_event().is_some() {}
+        while let Some(event) = window.pop_event() {
+            if matches!(event, crate::window::Event::Quit) {
+                self.exit_status.get_or_insert(0);
+            }
+        }
         let id = self.iokit.presented_surface;
         let Some(s) = id
             .checked_sub(1)

@@ -58,6 +58,7 @@ pub fn map_macho(mem: &mut Mem, vm: &mut VmMap, file: &[u8]) -> Result<Loaded, S
                 let initprot = le32(file, off + 44);
                 if name.starts_with(b"__PAGEZERO") {
                     loaded.page_zero = vmsize;
+                    vm.map_fixed(vmaddr, vmsize, Prot(0), "__PAGEZERO".into())?;
                 } else if vmsize != 0 {
                     vm.map_fixed(vmaddr, vmsize, Prot::from_bits(initprot), name_str(name))?;
                     let bytes = file

@@ -13,8 +13,6 @@ use super::{read_bytes, read_cstr, read_u32, write_bytes, write_u32, Kernel};
 pub enum Ret {
     Ok(u32, u32),
     Err(u32),
-    /// The thread was blocked; registers are set when it is woken.
-    Blocked,
 }
 
 const ENOMEM: u32 = 12;
@@ -100,12 +98,22 @@ impl Kernel {
     }
 
     fn sysctl(&mut self) -> Ret {
-        let (name, namelen, oldp, oldlenp, newp, newlen) =
-            (self.arg(0), self.arg(1), self.arg(2), self.arg(3), self.arg(4), self.arg(5));
-        let oid: Vec<u32> = (0..namelen.min(16)).map(|i| read_u32(&self.mem, name + i * 4)).collect();
+        let (name, namelen, oldp, oldlenp, newp, newlen) = (
+            self.arg(0),
+            self.arg(1),
+            self.arg(2),
+            self.arg(3),
+            self.arg(4),
+            self.arg(5),
+        );
+        let oid: Vec<u32> = (0..namelen.min(16))
+            .map(|i| read_u32(&self.mem, name + i * 4))
+            .collect();
         // sysctlbyname's name-to-OID lookup
         if oid == [0, 3] {
-            let wanted = String::from_utf8_lossy(&read_bytes(&self.mem, newp, newlen)).trim_end_matches('\0').to_string();
+            let wanted = String::from_utf8_lossy(&read_bytes(&self.mem, newp, newlen))
+                .trim_end_matches('\0')
+                .to_string();
             let Some((_, found)) = SYSCTLS.iter().find(|(n, _)| *n == wanted) else {
                 log_dbg!("xnu: unknown sysctl {wanted}");
                 return Ret::Err(vfs::ENOENT);
@@ -133,8 +141,10 @@ impl Kernel {
 
     fn write_stat(&mut self, addr: u32, st: &Stat, is64: bool) {
         let mut b = vec![0u8; if is64 { 108 } else { 96 }];
-        let put32 = |b: &mut Vec<u8>, o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
-        let put16 = |b: &mut Vec<u8>, o: usize, v: u16| b[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        let put32 =
+            |b: &mut Vec<u8>, o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let put16 =
+            |b: &mut Vec<u8>, o: usize, v: u16| b[o..o + 2].copy_from_slice(&v.to_le_bytes());
         put32(&mut b, 0, 0x1000003);
         if is64 {
             put16(&mut b, 4, st.mode);
@@ -180,7 +190,13 @@ impl Kernel {
     }
 
     fn mmap(&mut self) -> Ret {
-        let (addr, len, prot, flags, fd) = (self.arg(0), self.arg(1), self.arg(2), self.arg(3), self.arg(4));
+        let (addr, len, prot, flags, fd) = (
+            self.arg(0),
+            self.arg(1),
+            self.arg(2),
+            self.arg(3),
+            self.arg(4),
+        );
         let offset = self.arg(5) as u64 | (self.arg(6) as u64) << 32;
         const MAP_FIXED: u32 = 0x10;
         const MAP_ANON: u32 = 0x1000;
@@ -189,13 +205,24 @@ impl Kernel {
         }
         let size = round_up(len);
         let base = if flags & MAP_FIXED != 0 {
-            if self.vm.map_fixed(addr, size, Prot::from_bits(prot), "mmap".into()).is_err() {
+            if self
+                .vm
+                .map_fixed(addr, size, Prot::from_bits(prot), "mmap".into())
+                .is_err()
+            {
                 return Ret::Err(ENOMEM);
             }
             addr
         } else {
-            let hint = if addr != 0 && self.vm.is_free(addr, size) { addr } else { 0 };
-            match self.vm.map_anywhere(hint, size, 0, Prot::from_bits(prot), "mmap".into()) {
+            let hint = if addr != 0 && self.vm.is_free(addr, size) {
+                addr
+            } else {
+                0
+            };
+            match self
+                .vm
+                .map_anywhere(hint, size, 0, Prot::from_bits(prot), "mmap".into())
+            {
                 Some(a) => a,
                 None => return Ret::Err(ENOMEM),
             }
@@ -217,8 +244,12 @@ impl Kernel {
 
     fn getdirentries(&mut self, is64: bool) -> Ret {
         let (fd, buf, nbytes, basep) = (self.arg(0), self.arg(1), self.arg(2), self.arg(3));
-        let Some(f) = self.vfs.fds.get_mut(&fd) else { return Ret::Err(vfs::EBADF) };
-        let FileKind::Dir { entries, pos, .. } = &mut f.kind else { return Ret::Err(vfs::ENOTDIR) };
+        let Some(f) = self.vfs.fds.get_mut(&fd) else {
+            return Ret::Err(vfs::EBADF);
+        };
+        let FileKind::Dir { entries, pos, .. } = &mut f.kind else {
+            return Ret::Err(vfs::ENOTDIR);
+        };
         let mut out = Vec::new();
         while *pos < entries.len() {
             let (name, ty, ino) = &entries[*pos];
@@ -266,9 +297,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
     // For the indirect syscall, arguments are shifted by one register.
     if args_from == 1 {
         let regs = *k.cpu.regs();
-        for i in 0..6 {
-            k.cpu.regs_mut()[i] = regs[i + 1];
-        }
+        k.cpu.regs_mut()[..6].copy_from_slice(&regs[1..7]);
     }
     let args: [u32; 8] = std::array::from_fn(|i| k.arg(i));
     match num {
@@ -301,7 +330,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             }
         }
         15 | 16 | 124 | 123 | 34 | 35 | 95 | 131 | 138 | 139 => ok(0), // chmod, chown, fchmod, fchown, chflags, fchflags, fsync, flock, utimes, futimes
-        20 => ok(1),       // getpid: we are the only process
+        20 => ok(1),        // getpid: we are the only process
         24 | 25 => ok(501), // getuid, geteuid: mobile
         43 | 47 => ok(501), // getegid, getgid
         39 => ok(1),
@@ -324,7 +353,12 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                     match dup {
                         Some(kind) => {
                             let (path, flags, offset) = (f.path.clone(), f.flags, f.offset);
-                            ok(k.vfs.alloc_fd(OpenFile { kind, offset, path, flags }))
+                            ok(k.vfs.alloc_fd(OpenFile {
+                                kind,
+                                offset,
+                                path,
+                                flags,
+                            }))
                         }
                         None => Ret::Err(ENOTSUP),
                     }
@@ -371,7 +405,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 return Ret::Err(vfs::EBADF);
             }
             match cmd {
-                1 | 2 | 3 | 4 => ok(0), // F_GETFD, F_SETFD, F_GETFL, F_SETFL
+                1..=4 => ok(0), // F_GETFD, F_SETFD, F_GETFL, F_SETFL
                 50 => {
                     // F_GETPATH
                     let path = k.vfs.fds[&fd].path.clone();
@@ -398,7 +432,10 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             let (fd, iov, cnt) = (args[0], args[1], args[2]);
             let mut data = Vec::new();
             for i in 0..cnt {
-                let (base, len) = (read_u32(&k.mem, iov + i * 8), read_u32(&k.mem, iov + i * 8 + 4));
+                let (base, len) = (
+                    read_u32(&k.mem, iov + i * 8),
+                    read_u32(&k.mem, iov + i * 8 + 4),
+                );
                 data.extend(read_bytes(&k.mem, base, len));
             }
             res(k.vfs.write(fd, &data, None).map(|n| n as u32))
@@ -447,10 +484,18 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         },
         194 => {
             // getrlimit: unlimited-ish
-            write_bytes(&mut k.mem, args[1], &[(4096u64).to_le_bytes(), (u64::MAX >> 1).to_le_bytes()].concat());
+            write_bytes(
+                &mut k.mem,
+                args[1],
+                &[(4096u64).to_le_bytes(), (u64::MAX >> 1).to_le_bytes()].concat(),
+            );
             if args[0] == 8 {
                 // RLIMIT_NOFILE
-                write_bytes(&mut k.mem, args[1], &[(256u64).to_le_bytes(), (10240u64).to_le_bytes()].concat());
+                write_bytes(
+                    &mut k.mem,
+                    args[1],
+                    &[(256u64).to_le_bytes(), (10240u64).to_le_bytes()].concat(),
+                );
             }
             ok(0)
         }
@@ -467,7 +512,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 Err(e) => return Ret::Err(e),
             };
             let f = k.vfs.fds.get_mut(&fd).unwrap();
-            if matches!(f.kind, FileKind::Console | FileKind::Special(_)) {
+            if matches!(f.kind, FileKind::Console) {
                 return Ret::Err(ESPIPE);
             }
             let new = match whence {
@@ -494,7 +539,14 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         336 => Ret::Err(ENOTSUP),
         372 => ok(k.threads[k.current].id + 100), // thread_selfid
         _ => super::mach::bsd_extra(k, num).unwrap_or_else(|| {
-            log!("xnu: unimplemented syscall {num} (r0-r3 {:#x} {:#x} {:#x} {:#x}, lr {:#x})", args[0], args[1], args[2], args[3], k.cpu.regs()[14]);
+            log!(
+                "xnu: unimplemented syscall {num} (r0-r3 {:#x} {:#x} {:#x} {:#x}, lr {:#x})",
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                k.cpu.regs()[14]
+            );
             Ret::Err(ENOSYS)
         }),
     }

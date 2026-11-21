@@ -41,7 +41,8 @@ pub fn read_bytes(mem: &Mem, addr: u32, len: u32) -> Vec<u8> {
     if len == 0 {
         return Vec::new();
     }
-    mem.bytes_at(Ptr::<u8, false>::from_bits(addr), len).to_vec()
+    mem.bytes_at(Ptr::<u8, false>::from_bits(addr), len)
+        .to_vec()
 }
 pub fn write_u32(mem: &mut Mem, addr: u32, v: u32) {
     write_bytes(mem, addr, &v.to_le_bytes())
@@ -57,10 +58,17 @@ pub fn read_cstr(mem: &Mem, addr: u32) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     /// Waiting for a message on a port or port set (receive name).
-    MachReceive { name: u32, deadline: Option<u64> },
-    Semaphore { port: u32, deadline: Option<u64> },
-    Sleep { deadline: u64 },
-    Psynch { addr: u32, deadline: Option<u64> },
+    MachReceive {
+        name: u32,
+        deadline: Option<u64>,
+    },
+    Semaphore {
+        port: u32,
+        deadline: Option<u64>,
+    },
+    Sleep {
+        deadline: u64,
+    },
 }
 
 pub struct Thread {
@@ -85,16 +93,25 @@ pub struct Kernel {
     pub exit_status: Option<i32>,
     pub bsdthread_start: u32,
     pub pthread_size: u32,
+    pub trace: bool,
 }
 
 impl Kernel {
-    pub fn boot(fw: Firmware, overlay_dir: &Path, exe_path: &str, argv: Vec<String>) -> Result<Kernel, String> {
+    pub fn boot(
+        fw: Firmware,
+        overlay_dir: &Path,
+        exe_path: &str,
+        argv: Vec<String>,
+    ) -> Result<Kernel, String> {
         let mut mem = Mem::new();
         let mut vm = VmMap::new(0x1000, 0x2f000000);
 
         let exe = Self::read_fw_file(&fw, exe_path)?;
         let main = loader::map_macho(&mut mem, &mut vm, &exe)?;
-        let dylinker_path = main.dylinker.clone().ok_or("Executable has no dynamic linker")?;
+        let dylinker_path = main
+            .dylinker
+            .clone()
+            .ok_or("Executable has no dynamic linker")?;
         let dyld = loader::map_macho(&mut mem, &mut vm, &Self::read_fw_file(&fw, &dylinker_path)?)?;
         log!(
             "xnu: {exe_path} at {:#x}, dyld {dylinker_path} entry {:#x}",
@@ -115,7 +132,10 @@ impl Kernel {
         vm.map_fixed(COMM_PAGE, 0x1000, Prot(1), "commpage".into())?;
         Self::init_comm_page(&mut mem);
 
-        let envp = vec!["HOME=/var/mobile".to_string(), "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string()];
+        let envp = vec![
+            "HOME=/var/mobile".to_string(),
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+        ];
         let apple = vec![exe_path.to_string()];
         let sp = loader::build_stack(&mut mem, STACK_TOP, main.mach_header, &argv, &envp, &apple);
 
@@ -147,11 +167,15 @@ impl Kernel {
             exit_status: None,
             bsdthread_start: 0,
             pthread_size: 0,
+            trace: std::env::var_os("TOUCHHLE_XNU_TRACE").is_some(),
         })
     }
 
     fn read_fw_file(fw: &Firmware, path: &str) -> Result<Vec<u8>, String> {
-        let node = fw.volume.lookup(path, true).ok_or(format!("{path} not found in firmware"))?;
+        let node = fw
+            .volume
+            .lookup(path, true)
+            .ok_or(format!("{path} not found in firmware"))?;
         fw.volume.read_all(node).map_err(|e| format!("{path}: {e}"))
     }
 
@@ -164,9 +188,25 @@ impl Kernel {
         let (off, count) = (le(16) as usize, le(20) as usize);
         for i in 0..count {
             let m = off + i * 32;
-            let (addr, size, file_off, init_prot) = (le64(m) as u32, le64(m + 8) as u32, le64(m + 16) as usize, le(m + 28));
-            vm.map_fixed(addr, size, Prot::from_bits(init_prot), "shared cache".into())?;
-            write_bytes(mem, addr, cache.get(file_off..file_off + size as usize).ok_or("Truncated shared cache")?);
+            let (addr, size, file_off, init_prot) = (
+                le64(m) as u32,
+                le64(m + 8) as u32,
+                le64(m + 16) as usize,
+                le(m + 28),
+            );
+            vm.map_fixed(
+                addr,
+                size,
+                Prot::from_bits(init_prot),
+                "shared cache".into(),
+            )?;
+            write_bytes(
+                mem,
+                addr,
+                cache
+                    .get(file_off..file_off + size as usize)
+                    .ok_or("Truncated shared cache")?,
+            );
         }
         Ok(())
     }
@@ -195,7 +235,10 @@ impl Kernel {
         let tls = self.cpu.tls();
         let cur = &mut self.threads[self.current];
         cur.tls = tls;
-        let mut ctx = cur.context.take().unwrap_or_else(|| Box::new(CpuContext::new()));
+        let mut ctx = cur
+            .context
+            .take()
+            .unwrap_or_else(|| Box::new(CpuContext::new()));
         self.cpu.swap_context(&mut ctx);
         // ctx now holds the old thread's state
         let next_ctx = self.threads[idx].context.take();
@@ -242,7 +285,7 @@ impl Kernel {
                     false
                 }
             }
-            Block::MachReceive { deadline, .. } | Block::Semaphore { deadline, .. } | Block::Psynch { deadline, .. } => {
+            Block::MachReceive { deadline, .. } | Block::Semaphore { deadline, .. } => {
                 if mach::retry_blocked(self, block) {
                     true
                 } else if deadline.is_some_and(|d| now >= d) {
@@ -289,17 +332,56 @@ impl Kernel {
                     }
                 }
                 CpuState::Svc(0x80) => self.syscall(),
-                CpuState::Svc(other) => return Err(format!("Unexpected svc {other:#x} at {:#x}", self.cpu.regs()[Cpu::PC])),
+                CpuState::Svc(other) => {
+                    return Err(format!(
+                        "Unexpected svc {other:#x} at {:#x}",
+                        self.cpu.regs()[Cpu::PC]
+                    ))
+                }
                 CpuState::Error(e) => {
                     self.cpu.dump_regs();
-                    return Err(format!("CPU error {e:?} in thread {}", self.threads[self.current].id));
+                    self.backtrace();
+                    return Err(format!(
+                        "CPU error {e:?} in thread {}",
+                        self.threads[self.current].id
+                    ));
                 }
             }
         }
     }
 
+    /// Walks the r7 frame chain, which Apple's ABI always maintains.
+    fn backtrace(&self) {
+        let mut fp = self.cpu.regs()[7];
+        let mut frames = vec![format!("{:#x}", self.cpu.regs()[14])];
+        for _ in 0..32 {
+            if fp == 0 || fp & 3 != 0 || self.vm.region_at(fp).is_none() {
+                break;
+            }
+            frames.push(format!("{:#x}", read_u32(&self.mem, fp + 4)));
+            fp = read_u32(&self.mem, fp);
+        }
+        echo!("xnu: backtrace: {}", frames.join(" "));
+        let pc = self.cpu.regs()[Cpu::PC];
+        if let Some((base, r)) = self.vm.region_at(pc) {
+            echo!("xnu: pc {pc:#x} is in {} (+{:#x})", r.tag, pc - base);
+        }
+    }
+
     fn syscall(&mut self) {
         let num = self.cpu.regs()[12] as i32;
+        if self.trace {
+            let r = self.cpu.regs();
+            echo!(
+                "xnu: [{}] svc {num} ({:#x}, {:#x}, {:#x}, {:#x}) lr {:#x}",
+                self.current,
+                r[0],
+                r[1],
+                r[2],
+                r[3],
+                r[14]
+            );
+        }
         if num as u32 == 0x80000000 {
             // Platform calls: r3 selects.
             match self.cpu.regs()[3] {
@@ -321,24 +403,36 @@ impl Kernel {
             }
         } else if num < 0 {
             let r0 = mach::trap(self, -num as u32);
+            if self.trace {
+                echo!("xnu:   = {r0:x?}");
+            }
             if let Some(r0) = r0 {
                 self.cpu.regs_mut()[0] = r0;
             }
         } else {
-            let (num, args_from) = if num == 0 { (self.cpu.regs()[0], 1) } else { (num as u32, 0) };
+            let (num, args_from) = if num == 0 {
+                (self.cpu.regs()[0], 1)
+            } else {
+                (num as u32, 0)
+            };
             match bsd::syscall(self, num, args_from) {
                 bsd::Ret::Ok(r0, r1) => {
+                    if self.trace {
+                        echo!("xnu:   = {r0:#x}");
+                    }
                     self.cpu.regs_mut()[0] = r0;
                     self.cpu.regs_mut()[1] = r1;
                     let cpsr = self.cpu.cpsr() & !(1 << 29);
                     self.cpu.set_cpsr(cpsr);
                 }
                 bsd::Ret::Err(errno) => {
+                    if self.trace {
+                        echo!("xnu:   = errno {errno}");
+                    }
                     self.cpu.regs_mut()[0] = errno;
                     let cpsr = self.cpu.cpsr() | (1 << 29);
                     self.cpu.set_cpsr(cpsr);
                 }
-                bsd::Ret::Blocked => (),
             }
         }
     }

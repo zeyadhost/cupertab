@@ -21,7 +21,6 @@ pub const ENOTDIR: u32 = 20;
 pub const EISDIR: u32 = 21;
 pub const EINVAL: u32 = 22;
 
-pub const O_WRONLY: u32 = 1;
 pub const O_RDWR: u32 = 2;
 pub const O_APPEND: u32 = 8;
 pub const O_CREAT: u32 = 0x200;
@@ -40,15 +39,19 @@ pub struct Stat {
 }
 
 pub enum FileKind {
-    Firmware { node: u32 },
+    Firmware {
+        node: u32,
+    },
     Host(std::fs::File),
-    Dir { path: String, entries: Vec<(String, u8, u64)>, pos: usize },
+    Dir {
+        path: String,
+        entries: Vec<(String, u8, u64)>,
+        pos: usize,
+    },
     /// Character devices like /dev/null and the console.
     Null,
     Console,
     Random,
-    /// Placeholder for sockets, kqueues and pipes, handled in bsd.rs.
-    Special(u32),
 }
 
 pub struct OpenFile {
@@ -70,7 +73,11 @@ pub enum Resolved<'a> {
 }
 
 pub fn normalize(cwd: &str, path: &str) -> String {
-    let full = if path.starts_with('/') { path.to_string() } else { format!("{cwd}/{path}") };
+    let full = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("{cwd}/{path}")
+    };
     let mut parts: Vec<&str> = Vec::new();
     for c in full.split('/') {
         match c {
@@ -89,9 +96,21 @@ impl Vfs {
         let _ = std::fs::create_dir_all(overlay);
         let mut fds = HashMap::new();
         for fd in 0..3 {
-            fds.insert(fd, OpenFile { kind: FileKind::Console, offset: 0, path: "/dev/console".into(), flags: O_RDWR });
+            fds.insert(
+                fd,
+                OpenFile {
+                    kind: FileKind::Console,
+                    offset: 0,
+                    path: "/dev/console".into(),
+                    flags: O_RDWR,
+                },
+            );
         }
-        Vfs { overlay: overlay.to_path_buf(), fds, cwd: "/".into() }
+        Vfs {
+            overlay: overlay.to_path_buf(),
+            fds,
+            cwd: "/".into(),
+        }
     }
 
     pub fn alloc_fd(&mut self, file: OpenFile) -> u32 {
@@ -125,7 +144,11 @@ impl Vfs {
             }
             out = candidate;
         }
-        if out.is_empty() { "/".into() } else { out }
+        if out.is_empty() {
+            "/".into()
+        } else {
+            out
+        }
     }
 
     pub fn resolve<'a>(&self, fw: &'a Firmware, path: &str, follow: bool) -> Option<Resolved<'a>> {
@@ -139,7 +162,15 @@ impl Vfs {
 
     pub fn stat(&self, fw: &Firmware, path: &str, follow: bool) -> Result<Stat, u32> {
         if let Some(dev) = Self::device(path) {
-            return Ok(Stat { mode: 0o20666, ino: 1000 + dev as u64, size: 0, uid: 0, gid: 0, mtime: 0, nlink: 1 });
+            return Ok(Stat {
+                mode: 0o20666,
+                ino: 1000 + dev as u64,
+                size: 0,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+                nlink: 1,
+            });
         }
         match self.resolve(fw, path, follow).ok_or(ENOENT)? {
             Resolved::Firmware(n) => Ok(Self::node_stat(fw, n)),
@@ -161,9 +192,27 @@ impl Vfs {
 
     fn host_stat(p: &Path) -> Result<Stat, u32> {
         let m = std::fs::symlink_metadata(p).map_err(|_| ENOENT)?;
-        let mode = if m.is_dir() { 0o40755 } else if m.file_type().is_symlink() { 0o120755 } else { 0o100644 };
-        let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as u32);
-        Ok(Stat { mode, ino: 0x10000000 + (m.len() ^ mtime as u64), size: m.len(), uid: 501, gid: 501, mtime, nlink: 1 })
+        let mode = if m.is_dir() {
+            0o40755
+        } else if m.file_type().is_symlink() {
+            0o120755
+        } else {
+            0o100644
+        };
+        let mtime = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as u32);
+        Ok(Stat {
+            mode,
+            ino: 0x10000000 + (m.len() ^ mtime as u64),
+            size: m.len(),
+            uid: 501,
+            gid: 501,
+            mtime,
+            nlink: 1,
+        })
     }
 
     fn device(path: &str) -> Option<u8> {
@@ -177,8 +226,17 @@ impl Vfs {
 
     pub fn open(&mut self, fw: &Firmware, path: &str, flags: u32) -> Result<u32, u32> {
         if let Some(dev) = Self::device(path) {
-            let kind = match dev { 0 => FileKind::Null, 1 => FileKind::Console, _ => FileKind::Random };
-            return Ok(self.alloc_fd(OpenFile { kind, offset: 0, path: path.into(), flags }));
+            let kind = match dev {
+                0 => FileKind::Null,
+                1 => FileKind::Console,
+                _ => FileKind::Random,
+            };
+            return Ok(self.alloc_fd(OpenFile {
+                kind,
+                offset: 0,
+                path: path.into(),
+                flags,
+            }));
         }
         let canon = self.canonical(fw, path);
         let writing = flags & 3 != 0 || flags & (O_CREAT | O_TRUNC) != 0;
@@ -189,12 +247,20 @@ impl Vfs {
         let kind = match existing {
             Some(Resolved::Firmware(n)) if n.is_dir() => {
                 let entries = self.list_dir(fw, &canon);
-                FileKind::Dir { path: canon.clone(), entries, pos: 0 }
+                FileKind::Dir {
+                    path: canon.clone(),
+                    entries,
+                    pos: 0,
+                }
             }
             Some(Resolved::Firmware(n)) if !writing => FileKind::Firmware { node: n.id },
             Some(Resolved::Host(p)) if p.is_dir() => {
                 let entries = self.list_dir(fw, &canon);
-                FileKind::Dir { path: canon.clone(), entries, pos: 0 }
+                FileKind::Dir {
+                    path: canon.clone(),
+                    entries,
+                    pos: 0,
+                }
             }
             existing => {
                 // Copy up (or create) in the overlay.
@@ -204,17 +270,26 @@ impl Vfs {
                 }
                 match existing {
                     Some(Resolved::Firmware(n)) if !host.exists() && flags & O_TRUNC == 0 => {
-                        std::fs::write(&host, fw.volume.read_all(n).map_err(|_| EACCES)?).map_err(|_| EACCES)?;
+                        std::fs::write(&host, fw.volume.read_all(n).map_err(|_| EACCES)?)
+                            .map_err(|_| EACCES)?;
                     }
                     None if flags & O_CREAT == 0 => return Err(ENOENT),
                     _ => (),
                 }
                 let mut opts = std::fs::OpenOptions::new();
-                opts.read(true).write(writing).create(flags & O_CREAT != 0).truncate(flags & O_TRUNC != 0);
+                opts.read(true)
+                    .write(writing)
+                    .create(flags & O_CREAT != 0)
+                    .truncate(flags & O_TRUNC != 0);
                 FileKind::Host(opts.open(&host).map_err(|_| EACCES)?)
             }
         };
-        Ok(self.alloc_fd(OpenFile { kind, offset: 0, path: canon, flags }))
+        Ok(self.alloc_fd(OpenFile {
+            kind,
+            offset: 0,
+            path: canon,
+            flags,
+        }))
     }
 
     /// Directory entries (name, DT_* type, inode), merging firmware and overlay.
@@ -222,7 +297,13 @@ impl Vfs {
         let mut entries: Vec<(String, u8, u64)> = vec![(".".into(), 4, 2), ("..".into(), 4, 2)];
         if let Some(dir) = fw.volume.lookup(canon, true) {
             for n in fw.volume.children(dir.id) {
-                let t = if n.is_dir() { 4 } else if n.is_symlink() { 10 } else { 8 };
+                let t = if n.is_dir() {
+                    4
+                } else if n.is_symlink() {
+                    10
+                } else {
+                    8
+                };
                 entries.push((n.name.clone(), t, n.id as u64));
             }
         }
@@ -239,7 +320,13 @@ impl Vfs {
         entries
     }
 
-    pub fn read(&mut self, fw: &Firmware, fd: u32, buf: &mut [u8], offset: Option<u64>) -> Result<usize, u32> {
+    pub fn read(
+        &mut self,
+        fw: &Firmware,
+        fd: u32,
+        buf: &mut [u8],
+        offset: Option<u64>,
+    ) -> Result<usize, u32> {
         let f = self.fds.get_mut(&fd).ok_or(EBADF)?;
         let pos = offset.unwrap_or(f.offset);
         let n = match &mut f.kind {
@@ -259,7 +346,6 @@ impl Vfs {
                 buf.len()
             }
             FileKind::Dir { .. } => return Err(EISDIR),
-            FileKind::Special(_) => return Err(EINVAL),
         };
         if offset.is_none() {
             f.offset = pos + n as u64;
@@ -276,7 +362,11 @@ impl Vfs {
             }
             FileKind::Null | FileKind::Random => Ok(buf.len()),
             FileKind::Host(file) => {
-                let pos = if f.flags & O_APPEND != 0 { file.seek(SeekFrom::End(0)).map_err(|_| EINVAL)? } else { offset.unwrap_or(f.offset) };
+                let pos = if f.flags & O_APPEND != 0 {
+                    file.seek(SeekFrom::End(0)).map_err(|_| EINVAL)?
+                } else {
+                    offset.unwrap_or(f.offset)
+                };
                 file.seek(SeekFrom::Start(pos)).map_err(|_| EINVAL)?;
                 file.write_all(buf).map_err(|_| EACCES)?;
                 if offset.is_none() {
@@ -285,21 +375,38 @@ impl Vfs {
                 Ok(buf.len())
             }
             FileKind::Firmware { .. } | FileKind::Dir { .. } => Err(EBADF),
-            FileKind::Special(_) => Err(EINVAL),
         }
     }
 
     pub fn fstat(&self, fw: &Firmware, fd: u32) -> Result<Stat, u32> {
         let f = self.fds.get(&fd).ok_or(EBADF)?;
         match &f.kind {
-            FileKind::Firmware { node } => Ok(Self::node_stat(fw, fw.volume.lookup_id(*node).ok_or(EBADF)?)),
+            FileKind::Firmware { node } => Ok(Self::node_stat(
+                fw,
+                fw.volume.lookup_id(*node).ok_or(EBADF)?,
+            )),
             FileKind::Host(file) => {
                 let m = file.metadata().map_err(|_| EBADF)?;
-                Ok(Stat { mode: 0o100644, ino: 0x10000000, size: m.len(), uid: 501, gid: 501, mtime: 0, nlink: 1 })
+                Ok(Stat {
+                    mode: 0o100644,
+                    ino: 0x10000000,
+                    size: m.len(),
+                    uid: 501,
+                    gid: 501,
+                    mtime: 0,
+                    nlink: 1,
+                })
             }
             FileKind::Dir { path, .. } => self.stat(fw, &path.clone(), true),
-            FileKind::Special(_) => Ok(Stat { mode: 0o140777, ino: 0, size: 0, uid: 501, gid: 501, mtime: 0, nlink: 1 }),
-            _ => Ok(Stat { mode: 0o20666, ino: 1000, size: 0, uid: 0, gid: 0, mtime: 0, nlink: 1 }),
+            _ => Ok(Stat {
+                mode: 0o20666,
+                ino: 1000,
+                size: 0,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+                nlink: 1,
+            }),
         }
     }
 
@@ -312,7 +419,9 @@ impl Vfs {
 
     pub fn unlink(&self, fw: &Firmware, path: &str) -> Result<(), u32> {
         match self.resolve(fw, path, false).ok_or(ENOENT)? {
-            Resolved::Host(p) => std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(self.host_path(&self.canonical(fw, path)))).map_err(|_| EACCES),
+            Resolved::Host(p) => std::fs::remove_file(p)
+                .or_else(|_| std::fs::remove_dir(self.host_path(&self.canonical(fw, path))))
+                .map_err(|_| EACCES),
             Resolved::Firmware(_) => Err(EACCES),
         }
     }
@@ -333,7 +442,9 @@ impl Vfs {
     pub fn readlink(&self, fw: &Firmware, path: &str) -> Result<Vec<u8>, u32> {
         match self.resolve(fw, path, false).ok_or(ENOENT)? {
             Resolved::Firmware(n) if n.is_symlink() => fw.volume.read_all(n).map_err(|_| EACCES),
-            Resolved::Host(p) => std::fs::read_link(p).map(|t| t.to_string_lossy().into_owned().into_bytes()).map_err(|_| EINVAL),
+            Resolved::Host(p) => std::fs::read_link(p)
+                .map(|t| t.to_string_lossy().into_owned().into_bytes())
+                .map_err(|_| EINVAL),
             _ => Err(EINVAL),
         }
     }

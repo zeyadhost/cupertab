@@ -57,16 +57,30 @@ impl VmMap {
         true
     }
 
-    pub fn map_fixed(&mut self, addr: u32, size: u32, prot: Prot, tag: String) -> Result<(), String> {
+    pub fn map_fixed(
+        &mut self,
+        addr: u32,
+        size: u32,
+        prot: Prot,
+        tag: String,
+    ) -> Result<(), String> {
         let addr_aligned = addr & !(PAGE - 1);
         let size = round_up(size + (addr - addr_aligned));
         self.unmap(addr_aligned, size);
-        self.regions.insert(addr_aligned, Region { size, prot, tag });
+        self.regions
+            .insert(addr_aligned, Region { size, prot, tag });
         Ok(())
     }
 
     /// Finds a free range at or above `hint` (or the map's floor).
-    pub fn map_anywhere(&mut self, hint: u32, size: u32, align_mask: u32, prot: Prot, tag: String) -> Option<u32> {
+    pub fn map_anywhere(
+        &mut self,
+        hint: u32,
+        size: u32,
+        align_mask: u32,
+        prot: Prot,
+        tag: String,
+    ) -> Option<u32> {
         let size = round_up(size);
         let align = (align_mask | (PAGE - 1)).wrapping_add(1);
         let mut addr = hint.max(self.low);
@@ -99,10 +113,22 @@ impl VmMap {
             let r = self.regions.remove(&base).unwrap();
             let r_end = base as u64 + r.size as u64;
             if base < addr {
-                self.regions.insert(base, Region { size: addr - base, ..r.clone() });
+                self.regions.insert(
+                    base,
+                    Region {
+                        size: addr - base,
+                        ..r.clone()
+                    },
+                );
             }
             if r_end > end {
-                self.regions.insert(end as u32, Region { size: (r_end - end) as u32, ..r });
+                self.regions.insert(
+                    end as u32,
+                    Region {
+                        size: (r_end - end) as u32,
+                        ..r
+                    },
+                );
             }
         }
     }

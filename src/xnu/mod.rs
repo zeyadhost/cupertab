@@ -406,6 +406,9 @@ impl Kernel {
             .checked_sub(1)
             .and_then(|i| self.iokit.surfaces.get(i as usize))
         else {
+            // With no surface the LCD shows its black background.
+            let black = crate::image::Image::from_pixel_vec(vec![0, 0, 0, 255], (1, 1));
+            window.display_image(black);
             return;
         };
         if s.bytes_per_element != 4 {

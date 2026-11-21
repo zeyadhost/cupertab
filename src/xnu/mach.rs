@@ -163,6 +163,18 @@ impl Kernel {
                 }
             }
         }
+        if let Some(v) = self.iokit.vsync.as_mut() {
+            if v.next <= now {
+                v.next = now + super::iokit::VSync::PERIOD;
+                let m = v.message(now);
+                // One frame waits at most, as a display only has one.
+                if let Some(p) = self.ipc.ports.get_mut(&v.port) {
+                    if p.queue.is_empty() {
+                        p.queue.push_back(m);
+                    }
+                }
+            }
+        }
     }
 
     /// Sets r0 and the carry flag the way a BSD syscall returns.
@@ -268,6 +280,11 @@ impl Kernel {
             }
             // mach_port_destroy, mach_port_deallocate
             3205 | 3206 => r(KERN_SUCCESS),
+            // mach_port_get_refs(task, name, right): one of each.
+            3207 => Some(reply(msg, &[KERN_SUCCESS, 1], &[])),
+            // vm_purgable_control(task, address, control, &state): memory is
+            // never purged, so it stays nonvolatile.
+            4818 => Some(reply(msg, &[KERN_SUCCESS, 0], &[])),
             // mach_port_mod_refs(task, name, right, delta)
             3208 => r(KERN_SUCCESS),
             // mach_port_move_member(task, member, after) and

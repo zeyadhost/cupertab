@@ -44,6 +44,36 @@ pub struct Registry {
     pub entries: Vec<Entry>,
     /// Surfaces made through `IOCoreSurfaceRoot`, by ID minus one.
     pub surfaces: Vec<Surface>,
+    /// Async notification ports set on user clients, by entry.
+    pub notify_ports: std::collections::HashMap<usize, u32>,
+    /// The framebuffer's vsync callback, while enabled.
+    pub vsync: Option<VSync>,
+}
+
+/// A framebuffer vsync callback, sent at 60 Hz as an async completion.
+pub struct VSync {
+    pub port: u32,
+    pub callback: u32,
+    pub refcon: u32,
+    /// The absolute time of the next vsync.
+    pub next: u64,
+}
+
+impl VSync {
+    /// 24 MHz ticks per 60 Hz frame.
+    pub const PERIOD: u64 = 400_000;
+
+    /// The completion message IOKitLib dispatches to `callback(refcon,
+    /// result, args, 6)`; the first two arguments are the time stamp.
+    pub fn message(&self, time: u64) -> Vec<u8> {
+        const OS_NOTIFICATION_MESSAGE_ID: u32 = 53;
+        const ASYNC_COMPLETION_TYPE: u32 = 150;
+        let mut words = vec![0, 92, self.port, 0, 0, OS_NOTIFICATION_MESSAGE_ID];
+        words.extend([4 + 6 * 4, ASYNC_COMPLETION_TYPE]);
+        words.extend([self.port, self.callback, self.refcon, 0, 0, 0, 0, 0]);
+        words.extend([0, time as u32, (time >> 32) as u32, 0, 0, 0, 0]);
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
 }
 
 /// An IOSurface: pixels in guest memory, shared by every client.
@@ -76,6 +106,8 @@ impl Registry {
         let mut r = Registry {
             entries: Vec::new(),
             surfaces: Vec::new(),
+            notify_ports: Default::default(),
+            vsync: None,
         };
         let root = r.add(
             None,
@@ -105,6 +137,12 @@ impl Registry {
             "IOPMrootDomain",
             "IOPMrootDomain",
             vec![("name", strings(&["IOPMrootDomain"]))],
+        );
+        r.add(
+            Some(root),
+            "mbx",
+            "AppleMBXDevice",
+            vec![("name", strings(&["mbx"]))],
         );
         r.add(
             Some(root),
@@ -328,7 +366,7 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             let inband_out_max = le(msg, tail + 12) as usize;
             let class = k.iokit.entries[e].class.clone();
             let result = if class.ends_with("CLCD") {
-                framebuffer_method(k, selector, &scalars, inband)
+                framebuffer_method(k, e, selector, &scalars, inband)
             } else if class == "IOCoreSurfaceRoot" {
                 surface_method(k, selector, &scalars, inband)
             } else {
@@ -351,7 +389,13 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             Some(reply(msg, &body, &[]))
         }
         // io_connect_set_notification_port(connection, type, port, reference)
-        (2818, KObject::IoConnect(_)) => err(KERN_SUCCESS),
+        // A complex request: the port descriptor comes first.
+        (2818, KObject::IoConnect(e)) => {
+            if le(msg, 0) & 0x80000000 != 0 && msg.len() >= 32 {
+                k.iokit.notify_ports.insert(e, le(msg, 28));
+            }
+            err(KERN_SUCCESS)
+        }
         // io_service_add_notification(master, notification_type, matching,
         // wake_port, reference): a complex request, so the strings follow the
         // port descriptor and NDR. Services never appear or go away, so a
@@ -500,8 +544,9 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
 /// device's size. Returns scalar and struct outputs.
 fn framebuffer_method(
     k: &mut Kernel,
+    entry: usize,
     selector: u32,
-    _scalars: &[u64],
+    scalars: &[u64],
     _inband: &[u8],
 ) -> Option<(Vec<u64>, Vec<u8>)> {
     let (w, h) = display_size(&k.fw.info.product_type);
@@ -519,8 +564,22 @@ fn framebuffer_method(
             (Vec::new(), t)
         }
         3 | 4 | 5 | 7 | 12 | 15 | 17 | 19 | 22 | 33 => (vec![0], Vec::new()),
-        // Enable or disable vsync notifications.
-        9 => (Vec::new(), Vec::new()),
+        // Enable vsync notifications with (callback, refcon), or disable
+        // them with a null callback.
+        9 => {
+            let callback = *scalars.first()? as u32;
+            let refcon = scalars.get(1).map_or(0, |&v| v as u32);
+            k.iokit.vsync = match k.iokit.notify_ports.get(&entry) {
+                Some(&port) if callback != 0 => Some(VSync {
+                    port,
+                    callback,
+                    refcon,
+                    next: k.absolute_time() + VSync::PERIOD,
+                }),
+                _ => None,
+            };
+            (Vec::new(), Vec::new())
+        }
         _ => return None,
     })
 }

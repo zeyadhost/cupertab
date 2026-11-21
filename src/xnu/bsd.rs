@@ -407,6 +407,10 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                     let mut bits = read_u32(&k.mem, set + 4 * word);
                     for bit in 0..32 {
                         let fd = word * 32 + bit;
+                        if fd >= args[0] {
+                            bits &= !(1 << bit);
+                            continue;
+                        }
                         if bits & 1 << bit == 0 {
                             continue;
                         }

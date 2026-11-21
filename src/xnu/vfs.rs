@@ -38,10 +38,19 @@ pub struct Stat {
     pub nlink: u16,
 }
 
-/// Registered `EVFILT_USER` events: (ident, udata, fflags, triggered).
+/// Registered `EVFILT_USER` events.
 #[derive(Default)]
 pub struct Kqueue {
-    pub user: Vec<(u32, u32, u32, bool)>,
+    pub user: Vec<UserEvent>,
+}
+
+pub struct UserEvent {
+    pub ident: u32,
+    pub udata: u32,
+    pub fflags: u32,
+    /// `EV_ONESHOT`, `EV_CLEAR` and `EV_DISABLE` as last registered.
+    pub flags: u16,
+    pub triggered: bool,
 }
 
 pub enum FileKind {

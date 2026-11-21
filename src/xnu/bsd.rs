@@ -680,9 +680,17 @@ fn kevent(k: &mut Kernel, args: &[u32; 8]) -> Ret {
     const EVFILT_USER: i16 = -10;
     const EV_ADD: u16 = 0x1;
     const EV_DELETE: u16 = 0x2;
+    const EV_ENABLE: u16 = 0x4;
+    const EV_DISABLE: u16 = 0x8;
+    const EV_ONESHOT: u16 = 0x10;
+    const EV_CLEAR: u16 = 0x20;
     const EV_RECEIPT: u16 = 0x40;
     const EV_ERROR: u16 = 0x4000;
     const NOTE_TRIGGER: u32 = 0x0100_0000;
+    const NOTE_FFAND: u32 = 0x4000_0000;
+    const NOTE_FFOR: u32 = 0x8000_0000;
+    const NOTE_FFCOPY: u32 = 0xc000_0000;
+    const NOTE_FFCTRLMASK: u32 = 0xc000_0000;
     const NOTE_FFLAGSMASK: u32 = 0x00ff_ffff;
     const KEVENT_SIZE: u32 = 20;
 
@@ -700,22 +708,41 @@ fn kevent(k: &mut Kernel, args: &[u32; 8]) -> Ret {
             let fflags = read_u32(&k.mem, at + 8);
             let udata = read_u32(&k.mem, at + 16);
             if filter == EVFILT_USER {
-                let pos = kq.user.iter().position(|e| e.0 == ident);
+                let pos = kq.user.iter().position(|e| e.ident == ident);
                 if flags & EV_DELETE != 0 {
                     if let Some(p) = pos {
                         kq.user.remove(p);
                     }
-                } else {
-                    let p = pos.unwrap_or_else(|| {
-                        kq.user.push((ident, udata, 0, false));
+                } else if let Some(p) = pos.or_else(|| {
+                    (flags & EV_ADD != 0).then(|| {
+                        kq.user.push(vfs::UserEvent {
+                            ident,
+                            udata,
+                            fflags: 0,
+                            flags: 0,
+                            triggered: false,
+                        });
                         kq.user.len() - 1
-                    });
+                    })
+                }) {
                     let e = &mut kq.user[p];
                     if flags & EV_ADD != 0 {
-                        e.1 = udata;
+                        e.udata = udata;
+                        e.flags = (e.flags & EV_DISABLE) | (flags & (EV_ONESHOT | EV_CLEAR));
                     }
-                    e.2 |= fflags & NOTE_FFLAGSMASK;
-                    e.3 |= fflags & NOTE_TRIGGER != 0;
+                    if flags & EV_DISABLE != 0 {
+                        e.flags |= EV_DISABLE;
+                    } else if flags & EV_ENABLE != 0 {
+                        e.flags &= !EV_DISABLE;
+                    }
+                    let bits = fflags & NOTE_FFLAGSMASK;
+                    match fflags & NOTE_FFCTRLMASK {
+                        NOTE_FFAND => e.fflags &= bits,
+                        NOTE_FFOR => e.fflags |= bits,
+                        NOTE_FFCOPY => e.fflags = bits,
+                        _ => (),
+                    }
+                    e.triggered |= fflags & NOTE_TRIGGER != 0;
                 }
             }
             if flags & EV_RECEIPT != 0 {
@@ -729,11 +756,24 @@ fn kevent(k: &mut Kernel, args: &[u32; 8]) -> Ret {
             }
         }
         if out.is_empty() {
-            for e in kq.user.iter_mut().filter(|e| e.3) {
+            let mut i = 0;
+            while i < kq.user.len() && out.len() < nevents as usize {
+                let e = &mut kq.user[i];
+                if !e.triggered || e.flags & EV_DISABLE != 0 {
+                    i += 1;
+                    continue;
+                }
                 let filter_flags = EVFILT_USER as u16 as u32;
-                out.push([e.0, filter_flags, e.2, 0, e.1]);
-                e.2 = 0;
-                e.3 = false;
+                out.push([e.ident, filter_flags, e.fflags, 0, e.udata]);
+                if e.flags & EV_CLEAR != 0 {
+                    e.fflags = 0;
+                    e.triggered = false;
+                }
+                if e.flags & EV_ONESHOT != 0 {
+                    kq.user.remove(i);
+                } else {
+                    i += 1;
+                }
             }
         }
     }

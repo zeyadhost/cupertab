@@ -595,17 +595,24 @@ impl Kernel {
     }
 }
 
-pub fn boot_firmware(ipsw_path: &Path, key: Option<&str>, exe_path: &str) -> Result<(), String> {
+pub fn boot_firmware(
+    ipsw_path: &Path,
+    key: Option<&str>,
+    exe_path: &str,
+    headless: bool,
+) -> Result<(), String> {
     let base = crate::paths::user_data_base_path().join(crate::paths::FIRMWARE_DIR);
     let fw = Firmware::open(ipsw_path, &base, key)?;
     let overlay = base.join(format!("{}_{}_data", fw.info.product_type, fw.info.build));
     let mut kernel = Kernel::boot(fw, &overlay, exe_path, vec![exe_path.to_string()])?;
-    kernel.window = Some(Box::new(crate::window::Window::new(
-        "touchHLE (iPhone OS firmware)",
-        None,
-        None,
-        &crate::options::Options::default(),
-    )));
+    if !headless {
+        kernel.window = Some(Box::new(crate::window::Window::new(
+            "touchHLE (iPhone OS firmware)",
+            None,
+            None,
+            &crate::options::Options::default(),
+        )));
+    }
     let status = kernel.run()?;
     log!("xnu: process exited with status {status}");
     Ok(())

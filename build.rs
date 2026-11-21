@@ -82,6 +82,16 @@ pub fn main() {
     std::fs::write(out_dir.join("dynarmic_license.txt"), dynarmic_summary).unwrap();
 
     // libc++_shared.so has to be copied into the APK. See README of cargo-ndk.
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "emscripten" {
+        // gl4es provides OpenGL 2.1 on top of WebGL; web/build.sh builds it.
+        let gl4es_lib = std::env::var("TOUCHHLE_GL4ES_LIB_DIR").map_or_else(
+            |_| Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/gl4es/lib"),
+            PathBuf::from,
+        );
+        println!("cargo:rerun-if-env-changed=TOUCHHLE_GL4ES_LIB_DIR");
+        println!("cargo:rustc-link-search=native={}", gl4es_lib.display());
+        println!("cargo:rustc-link-lib=static=GL");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
         println!("cargo:rustc-link-lib=c++_shared");
         let sysroot_libs_path =

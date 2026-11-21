@@ -265,9 +265,21 @@ impl MachO {
                     if arch.cputype != mach_object::CPU_TYPE_ARM {
                         continue;
                     }
-                    if arch.cpusubtype == mach_object::CPU_SUBTYPE_ARM_V7
-                        || (arch.cpusubtype == mach_object::CPU_SUBTYPE_ARM_V6
-                            && best_type != Some(mach_object::CPU_SUBTYPE_ARM_V7))
+                    // The interpreter only implements ARMv6 (ARM, Thumb-1,
+                    // VFPv2), so it prefers ARMv6 slices.
+                    let (preferred, fallback) = if cfg!(feature = "dynarmic") {
+                        (
+                            mach_object::CPU_SUBTYPE_ARM_V7,
+                            mach_object::CPU_SUBTYPE_ARM_V6,
+                        )
+                    } else {
+                        (
+                            mach_object::CPU_SUBTYPE_ARM_V6,
+                            mach_object::CPU_SUBTYPE_ARM_V7,
+                        )
+                    };
+                    if arch.cpusubtype == preferred
+                        || (arch.cpusubtype == fallback && best_type != Some(preferred))
                         || best_type.is_none()
                     {
                         best_subslice = Some(

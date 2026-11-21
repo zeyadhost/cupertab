@@ -27,10 +27,10 @@ use std::net::TcpListener;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::coroutine::{Coroutine, Yielder};
 use crate::libc::pthread::cond::pthread_cond_t;
 use crate::libc::stdio::FILE;
 use crate::window::DeviceFamily;
-use corosensei::{Coroutine, Yielder};
 pub use mutex::{MutexId, MutexType, PTHREAD_MUTEX_DEFAULT};
 use nullable_box::NullableBox;
 
@@ -1296,8 +1296,8 @@ impl Environment {
             }));
             self = match res {
                 Ok(ret) => match ret {
-                    corosensei::CoroutineResult::Yield(env) => env,
-                    corosensei::CoroutineResult::Return((ret_val, _env)) => {
+                    crate::coroutine::CoroutineResult::Yield(env) => env,
+                    crate::coroutine::CoroutineResult::Return((ret_val, _env)) => {
                         return ret_val;
                     }
                 },
@@ -1318,7 +1318,7 @@ impl Environment {
                 ThreadBlock::NotBlocked => {}
                 ThreadBlock::Sleeping(until) => {
                     let duration = until.duration_since(Instant::now());
-                    std::thread::sleep(duration);
+                    crate::sleep(duration);
                 }
                 _ => {
                     panic!("Unexpected ThreadBlock in app picker!");
@@ -1357,8 +1357,8 @@ impl Environment {
             }));
             self = match res {
                 Ok(ret) => match ret {
-                    corosensei::CoroutineResult::Yield(env) => env,
-                    corosensei::CoroutineResult::Return(env) => {
+                    crate::coroutine::CoroutineResult::Yield(env) => env,
+                    crate::coroutine::CoroutineResult::Return(env) => {
                         kill_current_thread = true;
                         env
                     }
@@ -1855,7 +1855,7 @@ impl Environment {
             if let Some(next_awakening) = next_awakening {
                 let duration = next_awakening.duration_since(Instant::now());
                 log_dbg!("All threads blocked/asleep, sleeping for {:?}.", duration);
-                std::thread::sleep(duration);
+                crate::sleep(duration);
                 // Try again, there should be some thread awake now (or
                 // there will be soon, since timing is approximate).
                 continue;

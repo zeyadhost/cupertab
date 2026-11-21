@@ -181,12 +181,73 @@ pub enum GLVersion {
     GL21Compat,
 }
 
+#[cfg(not(target_os = "emscripten"))]
 pub struct GLContext(sdl2::video::GLContext);
 
+#[cfg(not(target_os = "emscripten"))]
 impl GLContext {
     pub fn is_current(&self) -> bool {
         self.0.is_current()
     }
+}
+
+/// On the web there is only one WebGL context per canvas, so every
+/// [GLContext] shares it, and gl4es (which provides OpenGL 2.1 on top of
+/// WebGL) keeps a separate GL state for each one.
+#[cfg(target_os = "emscripten")]
+pub struct GLContext(*mut std::ffi::c_void);
+
+#[cfg(target_os = "emscripten")]
+mod gl4es {
+    use std::cell::{Cell, RefCell};
+    use std::ffi::{c_char, c_int, c_void};
+
+    extern "C" {
+        pub fn initialize_gl4es();
+        pub fn set_getprocaddress(f: unsafe extern "C" fn(*const c_char) -> *mut c_void);
+        pub fn emscripten_GetProcAddress(name: *const c_char) -> *mut c_void;
+        pub fn NewGLState(shared_glstate: *mut c_void, es2only: c_int) -> *mut c_void;
+        pub fn ActivateGLState(new_glstate: *mut c_void);
+        pub fn gl4es_GetProcAddress(name: *const c_char) -> *mut c_void;
+    }
+
+    thread_local! {
+        pub static WEBGL_CTX: RefCell<Option<sdl2::video::GLContext>> = const { RefCell::new(None) };
+        pub static CURRENT_STATE: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
+    }
+}
+
+#[cfg(target_os = "emscripten")]
+impl GLContext {
+    pub fn is_current(&self) -> bool {
+        gl4es::CURRENT_STATE.with(|c| c.get()) == self.0
+    }
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn make_gl_context_current_raw(window: &sdl2::video::Window, gl_ctx: &GLContext) {
+    window.gl_make_current(&gl_ctx.0).unwrap();
+}
+#[cfg(target_os = "emscripten")]
+fn make_gl_context_current_raw(_window: &sdl2::video::Window, gl_ctx: &GLContext) {
+    unsafe { gl4es::ActivateGLState(gl_ctx.0) };
+    gl4es::CURRENT_STATE.with(|c| c.set(gl_ctx.0));
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn gl_get_proc_address_raw(
+    video_ctx: &sdl2::VideoSubsystem,
+    procname: &str,
+) -> *const std::ffi::c_void {
+    video_ctx.gl_get_proc_address(procname) as *const _
+}
+#[cfg(target_os = "emscripten")]
+fn gl_get_proc_address_raw(
+    _video_ctx: &sdl2::VideoSubsystem,
+    procname: &str,
+) -> *const std::ffi::c_void {
+    let name = std::ffi::CString::new(procname).unwrap();
+    unsafe { gl4es::gl4es_GetProcAddress(name.as_ptr()) }
 }
 
 fn surface_from_image(image: &Image) -> Surface<'_> {
@@ -433,6 +494,7 @@ impl Window {
             return;
         }
         self.last_polled = now;
+        crate::web_yield(false);
 
         fn transform_input_coords(
             window: &Window,
@@ -1145,6 +1207,37 @@ impl Window {
         (x, y, pressed)
     }
 
+    #[cfg(target_os = "emscripten")]
+    pub fn create_gl_context(&self, version: GLVersion) -> Result<GLContext, String> {
+        if !matches!(version, GLVersion::GL21Compat) {
+            return Err("Only OpenGL 2.1 (via gl4es) is available on the web".to_string());
+        }
+        gl4es::WEBGL_CTX.with(|ctx| -> Result<(), String> {
+            let mut ctx = ctx.borrow_mut();
+            if ctx.is_none() {
+                let attr = self.video_ctx.gl_attr();
+                attr.set_context_version(2, 0);
+                attr.set_context_profile(sdl2::video::GLProfile::GLES);
+                let gl_ctx = self.window.gl_create_context()?;
+                self.window.gl_make_current(&gl_ctx)?;
+                // Without a driver GetProcAddress, gl4es skips hardware
+                // detection and disables framebuffer objects.
+                unsafe {
+                    gl4es::set_getprocaddress(gl4es::emscripten_GetProcAddress);
+                    gl4es::initialize_gl4es();
+                }
+                *ctx = Some(gl_ctx);
+            }
+            Ok(())
+        })?;
+        let state = unsafe { gl4es::NewGLState(std::ptr::null_mut(), 0) };
+        if state.is_null() {
+            return Err("gl4es couldn't create a GL state".to_string());
+        }
+        Ok(GLContext(state))
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
     pub fn create_gl_context(&self, version: GLVersion) -> Result<GLContext, String> {
         let attr = self.video_ctx.gl_attr();
         match version {
@@ -1163,6 +1256,13 @@ impl Window {
         Ok(GLContext(gl_ctx))
     }
 
+    #[cfg(target_os = "emscripten")]
+    pub fn gl_get_proc_address(&self, procname: &str) -> *const std::ffi::c_void {
+        let name = std::ffi::CString::new(procname).unwrap();
+        unsafe { gl4es::gl4es_GetProcAddress(name.as_ptr()) }
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
     pub fn gl_get_proc_address(&self, procname: &str) -> *const std::ffi::c_void {
         // For some reason, rust-sdl2 uses *const (), but () is not meant to be
         // used for void pointees (just void results), so let's fix that.
@@ -1175,8 +1275,15 @@ impl Window {
             .set_share_with_current_context(value)
     }
 
+    #[cfg(not(target_os = "emscripten"))]
     pub unsafe fn make_gl_context_current(&self, gl_ctx: &GLContext) {
         self.window.gl_make_current(&gl_ctx.0).unwrap();
+    }
+
+    #[cfg(target_os = "emscripten")]
+    pub unsafe fn make_gl_context_current(&self, gl_ctx: &GLContext) {
+        gl4es::ActivateGLState(gl_ctx.0);
+        gl4es::CURRENT_STATE.with(|c| c.set(gl_ctx.0));
     }
 
     /// Make the internal OpenGL ES context (for splash screen and UI rendering)
@@ -1191,8 +1298,8 @@ impl Window {
                 .as_mut()
                 .unwrap()
                 .make_current_unchecked_for_window(
-                    &mut |gl_ctx| self.window.gl_make_current(&gl_ctx.0).unwrap(),
-                    &mut |s| self.video_ctx.gl_get_proc_address(s) as *const _,
+                    &mut |gl_ctx| make_gl_context_current_raw(&self.window, gl_ctx),
+                    &mut |s| gl_get_proc_address_raw(&self.video_ctx, s),
                 )
         };
         gl_ins
@@ -1215,8 +1322,8 @@ impl Window {
                 .as_mut()
                 .unwrap()
                 .make_current_unchecked_for_window(
-                    &mut |gl_ctx| self.window.gl_make_current(&gl_ctx.0).unwrap(),
-                    &mut |s| self.video_ctx.gl_get_proc_address(s) as *const _,
+                    &mut |gl_ctx| make_gl_context_current_raw(&self.window, gl_ctx),
+                    &mut |s| gl_get_proc_address_raw(&self.video_ctx, s),
                 );
 
             use crate::gles::gles11_raw as gles11; // constants only
@@ -1258,6 +1365,7 @@ impl Window {
         };
 
         self.window.gl_swap_window();
+        crate::web_yield(true);
 
         // hold onto GL context so the image doesn't disappear, and hold
         // onto image so we can rotate later if necessary
@@ -1267,6 +1375,7 @@ impl Window {
     /// presented.
     pub fn swap_window(&self) {
         self.window.gl_swap_window();
+        crate::web_yield(true);
     }
 
     /// Consider the emulated device to be rotated to a particular orientation.
@@ -1469,7 +1578,10 @@ pub fn show_error_messagebox(window: Option<&Window>, error_message: &str) {
         window.map(|win| &win.window),
         None,
     ) else {
-        panic!("Failed to show message box!");
+        // Message boxes aren't available everywhere (e.g. on the web); the
+        // error has already been logged.
+        echo!("Failed to show message box!");
+        return;
     };
 
     match clicked_button {

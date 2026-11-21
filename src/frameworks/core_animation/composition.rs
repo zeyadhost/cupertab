@@ -202,7 +202,15 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
                 texture,
                 0,
             );
-            assert_eq!(gles.GetError(), 0);
+            let gl_error = gles.GetError();
+            // Emscripten's fixed-function emulation reports errors for some
+            // state it doesn't model; they don't affect the output.
+            #[cfg(target_os = "emscripten")]
+            if gl_error != 0 {
+                log_dbg!("Ignoring GL error {:#x} under WebGL emulation", gl_error);
+            }
+            #[cfg(not(target_os = "emscripten"))]
+            assert_eq!(gl_error, 0);
             assert_eq!(
                 gles.CheckFramebufferStatusOES(gles11::FRAMEBUFFER_OES),
                 gles11::FRAMEBUFFER_COMPLETE_OES
@@ -354,7 +362,15 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
         gles.LoadIdentity();
         gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
         gles.BindBuffer(gles11::ELEMENT_ARRAY_BUFFER, 0);
-        assert_eq!(gles.GetError(), 0);
+        let gl_error = gles.GetError();
+        // Emscripten's fixed-function emulation reports errors for some
+        // state it doesn't model; they don't affect the output.
+        #[cfg(target_os = "emscripten")]
+        if gl_error != 0 {
+            log_dbg!("Ignoring GL error {:#x} under WebGL emulation", gl_error);
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        assert_eq!(gl_error, 0);
     }
 
     // Present our rendered frame (bound to TEXTURE_2D). This copies it to the

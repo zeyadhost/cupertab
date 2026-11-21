@@ -2,3 +2,22 @@
 # the documentation for the touchHLE crate is intended to include private items
 # alas this isn't scoped to that crate!
 rustdocflags = ["--document-private-items"]
+
+[target.wasm32-unknown-emscripten]
+rustflags = [
+    "-C", "link-arg=-sUSE_SDL=2",
+    "-C", "link-arg=-sDEFAULT_TO_CXX",
+    "-C", "link-arg=-lopenal",
+    "-C", "link-arg=-sASYNCIFY",
+    "-C", "link-arg=-sASYNCIFY_STACK_SIZE=1048576",
+    "-C", "link-arg=-sALLOW_MEMORY_GROWTH",
+    "-C", "link-arg=-sINITIAL_MEMORY=1216MB",
+    "-C", "link-arg=-sMAXIMUM_MEMORY=4GB",
+    "-C", "link-arg=-sSTACK_SIZE=8MB",
+    "-C", "link-arg=-sFULL_ES2",
+    "-C", "link-arg=-sGL_ENABLE_GET_PROC_ADDRESS",
+    "-C", "link-arg=-sFORCE_FILESYSTEM",
+    "-C", "link-arg=-sINVOKE_RUN=0",
+    "-C", "link-arg=-sEXIT_RUNTIME=0",
+    "-C", "link-arg=-sEXPORTED_RUNTIME_METHODS=callMain,FS",
+]

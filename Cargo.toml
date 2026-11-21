@@ -27,7 +27,8 @@ name = "touchHLE"
 path = "src/bin.rs"
 
 [features]
-default = ["static"]
+default = ["static", "dynarmic"]
+dynarmic = ["dep:touchHLE_dynarmic_wrapper"]
 static = ["sdl2/bundled", "sdl2/static-link", "touchHLE_openal_soft_wrapper/static"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -70,16 +71,14 @@ encoding_rs = "0.8.35"
 # SDL2 that rust-sdl2 uses, so that the Android JNI interface matches.
 sdl2 = { git = "https://github.com/touchHLE/rust-sdl2", tag = "touchHLE-3", features = ["hidapi"] }
 sdl2-sys = { git = "https://github.com/touchHLE/rust-sdl2", tag = "touchHLE-3" }
-touchHLE_dynarmic_wrapper = { path = "src/cpu/dynarmic_wrapper" }
+touchHLE_dynarmic_wrapper = { path = "src/cpu/dynarmic_wrapper", optional = true }
 touchHLE_gl_bindings = { path = "src/gles/gl_bindings" }
 touchHLE_openal_soft_wrapper = { path = "src/audio/openal_soft_wrapper" }
 touchHLE_pvrt_decompress_wrapper = { path = "src/image/pvrt_decompress_wrapper" }
 touchHLE_stb_image_wrapper = { path = "src/image/stb_image_wrapper" }
 touchHLE_version = { path = "src/version" }
-windows-sys = { version = "0.61.0", features = ["Win32_System_Memory"] }
 nibarchive = "0.1.0"
 libc = "0.2.180"
-corosensei = "0.3.2"
 uuid = { version = "1.2.2", default-features = false, features = ["v4"] }
 
 [build-dependencies]
@@ -87,3 +86,9 @@ cargo-license = "0.5.1"
 cc = { workspace = true }
 cmake = { workspace = true }
 gl_generator = { workspace = true }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+corosensei = "0.3.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.0", features = ["Win32_System_Memory"] }

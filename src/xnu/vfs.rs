@@ -52,6 +52,7 @@ pub enum FileKind {
     Null,
     Console,
     Random,
+    Socket(Box<super::lockdown::Socket>),
 }
 
 pub struct OpenFile {
@@ -390,6 +391,7 @@ impl Vfs {
                 }
                 buf.len()
             }
+            FileKind::Socket(s) => s.read(buf),
             FileKind::Dir { .. } => return Err(EISDIR),
         };
         if offset.is_none() {
@@ -406,6 +408,7 @@ impl Vfs {
                 Ok(buf.len())
             }
             FileKind::Null | FileKind::Random => Ok(buf.len()),
+            FileKind::Socket(s) => Ok(s.write(buf)),
             FileKind::Host(file) => {
                 let pos = if f.flags & O_APPEND != 0 {
                     file.seek(SeekFrom::End(0)).map_err(|_| EINVAL)?

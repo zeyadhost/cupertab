@@ -181,7 +181,13 @@ impl Interp {
                 self.regs[15] = pc.wrapping_add(if self.thumb { 2 } else { 4 });
                 res
             }
-            Err(_) => {
+            Err(Exit::Breakpoint | Exit::Undefined) => {
+                // PC points after the instruction, like dynarmic; the debugger
+                // rewinds it.
+                self.regs[15] = pc.wrapping_add(if self.thumb { 2 } else { 4 });
+                res
+            }
+            Err(Exit::MemoryError) => {
                 self.regs[15] = pc;
                 res
             }

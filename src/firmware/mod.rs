@@ -127,6 +127,9 @@ pub fn read_ipsw_info(ipsw_path: &Path) -> Result<IpswInfo, String> {
         .and_then(|v| v.as_string())
         .ok_or("Restore.plist does not name a root filesystem")?
         .to_string();
+    if rootfs_name.is_empty() || rootfs_name.contains(['/', '\\']) || rootfs_name.starts_with('.') {
+        return Err(format!("Bad root filesystem name {rootfs_name:?}"));
+    }
     Ok(IpswInfo {
         product_type: get("ProductType")?,
         product_version: get("ProductVersion")?,

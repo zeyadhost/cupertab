@@ -291,6 +291,25 @@ impl Cpu {
         self.interp.set_cpsr(cpsr)
     }
 
+    /// User read-only thread ID register (TPIDRURO), which iPhone OS uses as
+    /// the thread pointer. It is not part of [CpuContext].
+    #[cfg(feature = "dynarmic")]
+    pub fn tls(&self) -> u32 {
+        unsafe { touchHLE_DynarmicWrapper_tls(self.dynarmic_wrapper) }
+    }
+    #[cfg(not(feature = "dynarmic"))]
+    pub fn tls(&self) -> u32 {
+        self.interp.tls
+    }
+    #[cfg(feature = "dynarmic")]
+    pub fn set_tls(&mut self, value: u32) {
+        unsafe { touchHLE_DynarmicWrapper_set_tls(self.dynarmic_wrapper, value) }
+    }
+    #[cfg(not(feature = "dynarmic"))]
+    pub fn set_tls(&mut self, value: u32) {
+        self.interp.tls = value;
+    }
+
     #[cfg(feature = "dynarmic")]
     /// Swap the current state of the CPU (registers etc) with the state stored
     /// in the context object.

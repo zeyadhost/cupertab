@@ -256,7 +256,8 @@ impl Kernel {
             let name = name.as_bytes();
             let mut rec = Vec::new();
             if is64 {
-                // struct direntry: ino u64, seekoff u64, reclen u16, namlen u16, type u8, name[1024]
+                // struct direntry: ino u64, seekoff u64, reclen u16, namlen
+                // u16, type u8, name[1024]
                 let reclen = (8 + 8 + 2 + 2 + 1 + name.len() + 1).next_multiple_of(4);
                 rec.extend_from_slice(&ino.to_le_bytes());
                 rec.extend_from_slice(&(*pos as u64 + 1).to_le_bytes());
@@ -266,7 +267,8 @@ impl Kernel {
                 rec.extend_from_slice(name);
                 rec.resize(reclen, 0);
             } else {
-                // struct dirent: ino u32, reclen u16, type u8, namlen u8, name[256]
+                // struct dirent: ino u32, reclen u16, type u8, namlen u8,
+                // name[256]
                 let reclen = (4 + 2 + 1 + 1 + name.len() + 1).next_multiple_of(4);
                 rec.extend_from_slice(&(*ino as u32).to_le_bytes());
                 rec.extend_from_slice(&(reclen as u16).to_le_bytes());
@@ -367,7 +369,8 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             }
         }
         46 | 48 | 53 | 329 | 331 => {
-            // sigaction, sigprocmask, sigaltstack, __pthread_sigmask, __disable_threadsignal
+            // sigaction, sigprocmask, sigaltstack, __pthread_sigmask,
+            // __disable_threadsignal
             if num == 46 && args[2] != 0 {
                 write_bytes(&mut k.mem, args[2], &[0; 12]);
             }

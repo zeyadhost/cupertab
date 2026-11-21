@@ -182,7 +182,8 @@ impl Kernel {
                 }
                 r(KERN_SUCCESS)
             }
-            // mach_port_insert_right, mach_port_request_notification-ish, set_attributes
+            // mach_port_insert_right, mach_port_request_notification-ish,
+            // set_attributes
             3214..=3230 => {
                 if id == 3216 {
                     // mach_port_request_notification: no previous port
@@ -215,7 +216,8 @@ impl Kernel {
             3419 => r(KERN_SUCCESS),
             // vm_allocate(task, &addr, size, flags) / mach_vm_allocate
             3801 | 4800 => {
-                // On 32-bit ARM, mach_vm_address_t and mach_vm_size_t are 32-bit.
+                // On 32-bit ARM, mach_vm_address_t and mach_vm_size_t are
+                // 32-bit.
                 let (addr, size, flags) = (arg(0), arg(1), arg(2));
                 let addr = self.vm_allocate(addr, size, 0, flags, "vm_allocate");
                 match addr {
@@ -230,7 +232,8 @@ impl Kernel {
                     None => r(KERN_NO_SPACE),
                 }
             }
-            // mach_vm_map(task, &addr u64, size u64, mask u64, flags, [object], offset u64, copy, cur, max, inherit)
+            // mach_vm_map(task, &addr u64, size u64, mask u64, flags, [object],
+            // offset u64, copy, cur, max, inherit)
             4811 | 3812 => {
                 let (addr, size, mask, flags) = (arg(0), arg(1), arg(2), arg(3));
                 let obj = if descs != 0 { le(msg, 28) } else { 0 };
@@ -268,7 +271,8 @@ impl Kernel {
                 let mut words = vec![KERN_SUCCESS, count.min(64)];
                 words.extend(std::iter::repeat_n(0, count.min(64) as usize));
                 if id == 200 && arg(0) == 1 {
-                    // HOST_BASIC_INFO: max_cpus, avail_cpus, memory_size, cpu_type, cpu_subtype
+                    // HOST_BASIC_INFO: max_cpus, avail_cpus, memory_size,
+                    // cpu_type, cpu_subtype
                     words[2..7].copy_from_slice(&[1, 1, 128 << 20, 12, 6]);
                 }
                 if id == 200 && arg(0) == 5 && count >= 8 {
@@ -295,7 +299,8 @@ impl Kernel {
                     &[],
                 ))
             }
-            // thread_policy_set, thread_set_exception_ports, task_set_exception_ports
+            // thread_policy_set, thread_set_exception_ports,
+            // task_set_exception_ports
             3413 | 3613 | 3616 | 3617 => r(KERN_SUCCESS),
             // mach_ports_lookup: no registered ports
             3404 => r(5),
@@ -403,7 +408,8 @@ impl Kernel {
                 }
                 let m = p.queue.pop_front().unwrap();
                 write_bytes(&mut self.mem, msg, &m);
-                // msgh_local_port of the received message is the port it came on
+                // msgh_local_port of the received message is the port it came
+                // on
                 write_u32(&mut self.mem, msg + 12, n);
                 return Some(KERN_SUCCESS);
             }

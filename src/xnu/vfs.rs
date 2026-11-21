@@ -292,7 +292,8 @@ impl Vfs {
         }))
     }
 
-    /// Directory entries (name, DT_* type, inode), merging firmware and overlay.
+    /// Directory entries (name, DT_* type, inode), merging firmware and
+    /// overlay.
     pub fn list_dir(&self, fw: &Firmware, canon: &str) -> Vec<(String, u8, u64)> {
         let mut entries: Vec<(String, u8, u64)> = vec![(".".into(), 4, 2), ("..".into(), 4, 2)];
         if let Some(dir) = fw.volume.lookup(canon, true) {

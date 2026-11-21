@@ -48,6 +48,8 @@ pub struct Ipc {
     pub task_port: u32,
     pub host_port: u32,
     pub bootstrap_port: u32,
+    /// Bootstrap services by name.
+    pub services: HashMap<String, u32>,
 }
 
 impl Ipc {
@@ -58,6 +60,7 @@ impl Ipc {
             task_port: 0,
             host_port: 0,
             bootstrap_port: 0,
+            services: HashMap::new(),
         };
         ipc.task_port = ipc.new_kernel_port(KObject::Task);
         ipc.host_port = ipc.new_kernel_port(KObject::Host);
@@ -418,26 +421,56 @@ impl Kernel {
     }
 }
 
-/// The bootstrap port (launchd). Lookups of services we do not provide fail.
+/// The bootstrap port (launchd's job server). There is a single task, so
+/// services registered or checked in are simply looked up by name.
 pub fn bootstrap_msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
+    const BOOTSTRAP_UNKNOWN_SERVICE: u32 = 1102;
+    const MACH_MSG_TYPE_PORT_RECEIVE: u32 = 16;
     let id = le(msg, 20);
-    let name_at = |o: usize| {
-        let s = &msg[o..(o + 128).min(msg.len())];
-        String::from_utf8_lossy(&s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())])
-            .into_owned()
+    let descs = if le(msg, 0) & 0x80000000 != 0 {
+        4 + 12 * le(msg, 24) as usize
+    } else {
+        0
+    };
+    let name_off = 24 + descs + 8;
+    let name = {
+        let s = &msg[name_off.min(msg.len())..(name_off + 128).min(msg.len())];
+        let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+        String::from_utf8_lossy(&s[..end]).into_owned()
     };
     match id {
-        // bootstrap_look_up(bp, name[128])
-        404 | 402 => {
-            log!(
-                "xnu: bootstrap_look_up({:?}) - no such service",
-                name_at(32)
-            );
-            Some(reply(msg, &[1102], &[])) // BOOTSTRAP_UNKNOWN_SERVICE
+        // bootstrap_check_in: hands out the receive right for a service.
+        402 => {
+            let port = *k.ipc.services.entry(name.clone()).or_insert(0);
+            let port = if port == 0 {
+                let p = k.ipc.new_port();
+                k.ipc.services.insert(name.clone(), p);
+                p
+            } else {
+                port
+            };
+            log_dbg!("xnu: bootstrap_check_in({name:?}) = {port:#x}");
+            Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_RECEIVE)]))
         }
+        // bootstrap_register(name, service_port)
+        403 => {
+            let port = le(msg, 28);
+            log_dbg!("xnu: bootstrap_register({name:?}, {port:#x})");
+            k.ipc.services.insert(name, port);
+            Some(reply(msg, &[KERN_SUCCESS], &[]))
+        }
+        // bootstrap_look_up
+        404 => match k.ipc.services.get(&name) {
+            Some(&port) => {
+                Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_SEND)]))
+            }
+            None => {
+                log!("xnu: bootstrap_look_up({name:?}): no such service");
+                Some(reply(msg, &[BOOTSTRAP_UNKNOWN_SERVICE], &[]))
+            }
+        },
         _ => {
             log!("xnu: unhandled bootstrap request {id}");
-            let _ = k;
             Some(reply(msg, &[MIG_BAD_ID], &[]))
         }
     }

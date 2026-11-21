@@ -640,6 +640,11 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     // will go to the default framebuffer (the window).
     gles.DeleteFramebuffersOES(1, &src_framebuffer);
 
+    // glIsEnabled() is used rather than glGetBooleanv() because gl4es only
+    // answers the latter for state WebGL knows about, and reports
+    // fixed-function capabilities like GL_TEXTURE_2D as disabled. gl4es's
+    // glIsEnabled() can return any non-zero value for true, so normalize it.
+    //
     // Reset various things that could affect the quad or virtual cursor we're
     // going to draw. Back up the old state while doing so, so it can be
     // restored later. The app's subsequent drawing will be messed up if we
@@ -647,7 +652,7 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     let old_arrays = {
         let mut old_arrays = [gles11::FALSE; gles1_on_gl2::ARRAYS.len()];
         for (is_enabled, info) in old_arrays.iter_mut().zip(gles1_on_gl2::ARRAYS.iter()) {
-            gles.GetBooleanv(info.name, is_enabled);
+            *is_enabled = (gles.IsEnabled(info.name) != gles11::FALSE) as GLboolean;
             gles.DisableClientState(info.name);
         }
         old_arrays
@@ -658,7 +663,7 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
             .iter_mut()
             .zip(gles1_on_gl2::CAPABILITIES.iter())
         {
-            gles.GetBooleanv(name, is_enabled);
+            *is_enabled = (gles.IsEnabled(name) != gles11::FALSE) as GLboolean;
             gles.Disable(name);
         }
         old_capabilities

@@ -46,7 +46,7 @@ impl<R: ReadAt> EncryptedImage<R> {
             return Err("Not an encrcdsa v2 image".to_string());
         }
         let chunk_size = be32(&header[0x34..]) as u64;
-        if chunk_size == 0 || chunk_size % 16 != 0 || chunk_size > 1 << 20 {
+        if chunk_size == 0 || !chunk_size.is_multiple_of(16) || chunk_size > 1 << 20 {
             return Err(format!("Bad encrcdsa chunk size {chunk_size}"));
         }
         Ok(EncryptedImage {

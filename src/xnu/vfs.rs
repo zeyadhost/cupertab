@@ -123,12 +123,12 @@ impl Vfs {
     }
 
     fn host_path(&self, path: &str) -> PathBuf {
-        // Only plain components, so no guest path (e.g. "/C:/x" on Windows)
-        // can leave the overlay.
+        // Characters a host may treat as path syntax (e.g. "/C:/x" on
+        // Windows) are escaped so no guest path can leave the overlay.
         let mut p = self.overlay.clone();
         for c in path.split('/') {
-            if !c.is_empty() && c != "." && c != ".." && !c.contains([':', '\\']) {
-                p.push(c);
+            if !c.is_empty() && c != "." && c != ".." {
+                p.push(c.replace('%', "%25").replace(':', "%3A").replace('\\', "%5C"));
             }
         }
         p
@@ -343,7 +343,12 @@ impl Vfs {
         }
         if let Ok(rd) = std::fs::read_dir(self.host_path(canon)) {
             for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
+                let name = e
+                    .file_name()
+                    .to_string_lossy()
+                    .replace("%5C", "\\")
+                    .replace("%3A", ":")
+                    .replace("%25", "%");
                 if entries.iter().any(|(n, _, _)| *n == name) {
                     continue;
                 }

@@ -430,6 +430,24 @@ impl Kernel {
         }
     }
 
+    /// A thread's r0-r15 and CPSR, whether or not it is running.
+    fn thread_regs(&mut self, idx: usize) -> Option<[u32; 17]> {
+        let read = |cpu: &Cpu| {
+            let mut state = [0; 17];
+            state[..16].copy_from_slice(cpu.regs());
+            state[16] = cpu.cpsr();
+            state
+        };
+        if idx == self.current {
+            return Some(read(&self.cpu));
+        }
+        let ctx = self.threads.get_mut(idx)?.context.as_mut()?;
+        self.cpu.swap_context(ctx);
+        let state = read(&self.cpu);
+        self.cpu.swap_context(ctx);
+        Some(state)
+    }
+
     /// Walks the r7 frame chain, which Apple's ABI always maintains.
     fn backtrace(&self) {
         let mut fp = self.cpu.regs()[7];

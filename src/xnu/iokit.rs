@@ -369,6 +369,8 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
                 framebuffer_method(k, le(msg, 8), selector, &scalars, inband)
             } else if class == "IOCoreSurfaceRoot" {
                 surface_method(k, selector, &scalars, inband)
+            } else if class == "AppleMBXDevice" {
+                mbx_method(selector, &scalars)
             } else {
                 None
             };
@@ -627,6 +629,19 @@ fn surface_info(id: u32, s: &Surface) -> Vec<u8> {
 
 /// `IOCoreSurfaceRoot` user client methods, as IOSurface.framework calls
 /// them.
+/// MBX2D opens a device client (type 0), asks it for a token with selector 0,
+/// then opens a shared client (type 1) and passes the token back to selector
+/// 0 there before querying it with selector 2.
+fn mbx_method(selector: u32, scalars: &[u64]) -> Option<(Vec<u64>, Vec<u8>)> {
+    const SHARED_TOKEN: u64 = 1;
+    Some(match (selector, scalars) {
+        (0, []) => (vec![SHARED_TOKEN], Vec::new()),
+        (0, [SHARED_TOKEN, ..]) => (Vec::new(), Vec::new()),
+        (2, []) => (vec![0], Vec::new()),
+        _ => return None,
+    })
+}
+
 fn surface_method(
     k: &mut Kernel,
     selector: u32,

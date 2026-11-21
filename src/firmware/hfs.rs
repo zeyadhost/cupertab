@@ -106,7 +106,7 @@ impl<R: ReadAt> Volume<R> {
             private_dir: None,
         };
         let extents_file = parse_fork(&vh[0xc0..]);
-        let catalog_file = parse_fork(&vh[0x110..]);
+        let mut catalog_file = parse_fork(&vh[0x110..]);
 
         let mut overflow: HashMap<u32, Vec<(u32, Vec<Extent>)>> = HashMap::new();
         vol.walk_btree(&extents_file, |key, rec| {
@@ -119,6 +119,14 @@ impl<R: ReadAt> Volume<R> {
             let extents = parse_fork(&[&[0u8; 16][..], &rec[..64]].concat()).extents;
             overflow.entry(file_id).or_default().push((start, extents));
         })?;
+
+        const CATALOG_FILE_ID: u32 = 4;
+        if let Some(records) = overflow.get_mut(&CATALOG_FILE_ID) {
+            records.sort_by_key(|(start, _)| *start);
+            for (_, extents) in records.iter() {
+                catalog_file.extents.extend(extents);
+            }
+        }
 
         let mut catalog_err = None;
         let mut nodes = HashMap::new();

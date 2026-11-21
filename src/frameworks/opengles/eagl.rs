@@ -684,7 +684,7 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     // GL's initial values are 4 and FLOAT.
     let valid_size = |size: GLint| if (2..=4).contains(&size) { size } else { 4 };
     let valid_type = |type_: GLenum| match type_ {
-        gles11::SHORT | gles11::FLOAT | gles11::FIXED => type_,
+        gles11::BYTE | gles11::SHORT | gles11::FLOAT | gles11::FIXED => type_,
         _ => gles11::FLOAT,
     };
     let old_vertex_array_size: GLint = valid_size(get_int(gles, gles11::VERTEX_ARRAY_SIZE));

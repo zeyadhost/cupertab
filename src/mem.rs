@@ -547,6 +547,13 @@ impl Mem {
         let guest_mem_range = self.bytes().as_ptr_range();
         assert!(guest_mem_range.contains(&host_ptr));
         let guest_addr = host_ptr as usize - guest_mem_range.start as usize;
+        // Undo host_index()'s folding of the main thread stack.
+        #[cfg(target_os = "emscripten")]
+        let guest_addr = if guest_addr >= WINDOW_SIZE - WINDOW_TOP_RESERVED as usize {
+            (guest_addr as u64 + (1u64 << 32) - WINDOW_SIZE as u64) as usize
+        } else {
+            guest_addr
+        };
         Ptr::from_bits(u32::try_from(guest_addr).unwrap())
     }
 

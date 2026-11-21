@@ -21,6 +21,7 @@ pub const MACH_SEND_INVALID_DEST: u32 = 0x10000003;
 pub const MACH_RCV_TIMED_OUT: u32 = 0x10004003;
 pub const MACH_RCV_TOO_LARGE: u32 = 0x10004004;
 /// Disposition of a received send right.
+const MACH_MSG_TYPE_PORT_SEND_ONCE: u32 = 18;
 const MACH_MSG_TYPE_PORT_SEND: u32 = 17;
 pub const MIG_BAD_ID: u32 = (-303i32) as u32;
 
@@ -31,6 +32,7 @@ pub enum KObject {
     Host,
     Semaphore { count: i32 },
     Clock,
+    IoMaster,
 }
 
 #[derive(Debug, Default)]
@@ -48,6 +50,10 @@ pub struct Ipc {
     pub task_port: u32,
     pub host_port: u32,
     pub bootstrap_port: u32,
+    /// Bootstrap services by name.
+    pub services: HashMap<String, u32>,
+    /// mk_timer ports and their armed deadlines (absolute time).
+    pub timers: HashMap<u32, Option<u64>>,
 }
 
 impl Ipc {
@@ -58,6 +64,8 @@ impl Ipc {
             task_port: 0,
             host_port: 0,
             bootstrap_port: 0,
+            services: HashMap::new(),
+            timers: HashMap::new(),
         };
         ipc.task_port = ipc.new_kernel_port(KObject::Task);
         ipc.host_port = ipc.new_kernel_port(KObject::Host);
@@ -119,6 +127,43 @@ fn reply(req: &[u8], body: &[u32], complex_ports: &[(u32, u32)]) -> Vec<u8> {
 }
 
 impl Kernel {
+    /// Queues the expiry message of every mk_timer whose deadline passed.
+    fn fire_timers(&mut self) {
+        let now = self.absolute_time();
+        for (&port, deadline) in self.ipc.timers.iter_mut() {
+            if deadline.is_some_and(|d| d <= now) {
+                *deadline = None;
+                let mut m = Vec::with_capacity(48);
+                for w in [0u32, 48, 0, port, 0, 0] {
+                    m.extend(w.to_le_bytes());
+                }
+                m.resize(48, 0);
+                if let Some(p) = self.ipc.ports.get_mut(&port) {
+                    p.queue.push_back(m);
+                }
+            }
+        }
+    }
+
+    /// Sets r0 and the carry flag the way a BSD syscall returns.
+    pub fn set_bsd_result(&mut self, r: Result<u32, u32>) {
+        let (r0, carry) = match r {
+            Ok(v) => (v, 0),
+            Err(e) => (e, 1 << 29),
+        };
+        self.cpu.regs_mut()[0] = r0;
+        let cpsr = (self.cpu.cpsr() & !(1 << 29)) | carry;
+        self.cpu.set_cpsr(cpsr);
+    }
+
+    pub fn semaphore_signal(&mut self, port: u32) {
+        if let Some(Some(KObject::Semaphore { count })) =
+            self.ipc.ports.get_mut(&port).map(|p| p.kobject.as_mut())
+        {
+            *count += 1;
+        }
+    }
+
     /// vm_allocate/vm_map semantics: VM_FLAGS_ANYWHERE picks a free range;
     /// otherwise the range must be free unless VM_FLAGS_OVERWRITE is set.
     fn vm_allocate(
@@ -175,21 +220,21 @@ impl Kernel {
             // mach_port_mod_refs(task, name, right, delta)
             3208 => r(KERN_SUCCESS),
             // mach_port_move_member(task, member, after)
-            3213 => {
+            3212 => {
                 let (member, set) = (arg(0), arg(1));
                 if let Some(p) = self.ipc.ports.get_mut(&member) {
                     p.set = if set == 0 { None } else { Some(set) };
                 }
                 r(KERN_SUCCESS)
             }
-            // mach_port_insert_right, mach_port_request_notification-ish,
-            // set_attributes
-            3214..=3230 => {
-                if id == 3216 {
-                    // mach_port_request_notification: no previous port
-                    return Some(reply(msg, &[KERN_SUCCESS, 0], &[]));
-                }
-                r(KERN_SUCCESS)
+            // mach_port_request_notification: there is no previous port
+            3213 => Some(reply(msg, &[], &[(0, MACH_MSG_TYPE_PORT_SEND_ONCE)])),
+            // mach_port_insert_right, set_attributes and the like
+            3214..=3230 => r(KERN_SUCCESS),
+            // host_get_io_master
+            205 => {
+                let port = self.ipc.new_kernel_port(KObject::IoMaster);
+                Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_SEND)]))
             }
             // task_get_special_port(task, which)
             3409 => {
@@ -204,6 +249,28 @@ impl Kernel {
             }
             // task_set_special_port
             3410 => r(KERN_SUCCESS),
+            // task_threads(task): an out-of-line array of thread ports
+            3402 => {
+                let ports: Vec<u32> = self
+                    .threads
+                    .iter()
+                    .filter(|t| !t.exited)
+                    .map(|t| t.port)
+                    .collect();
+                let bytes: Vec<u8> = ports.iter().flat_map(|p| p.to_le_bytes()).collect();
+                let addr = self.vm_allocate(0, bytes.len() as u32, 0, 1, "task_threads")?;
+                write_bytes(&mut self.mem, addr, &bytes);
+                let mut m = reply(msg, &[ports.len() as u32], &[(0, 0)]);
+                const MACH_MSG_OOL_PORTS_DESCRIPTOR: u32 = 2;
+                // MACH_MSG_PHYSICAL_COPY. The 32-bit layout is address, count,
+                // then the flag bytes.
+                let flags =
+                    MACH_MSG_OOL_PORTS_DESCRIPTOR << 24 | MACH_MSG_TYPE_PORT_SEND << 16 | 1 << 8;
+                for (o, w) in [(28, addr), (32, ports.len() as u32), (36, flags)] {
+                    m[o..o + 4].copy_from_slice(&w.to_le_bytes());
+                }
+                Some(m)
+            }
             // semaphore_create(task, policy, value)
             3418 => {
                 let value = arg(1) as i32;
@@ -219,7 +286,11 @@ impl Kernel {
                 // On 32-bit ARM, mach_vm_address_t and mach_vm_size_t are
                 // 32-bit.
                 let (addr, size, flags) = (arg(0), arg(1), arg(2));
-                let addr = self.vm_allocate(addr, size, 0, flags, "vm_allocate");
+                let got = self.vm_allocate(addr, size, 0, flags, "vm_allocate");
+                if self.trace {
+                    echo!("xnu:   vm_allocate({addr:#x}, {size:#x}, {flags:#x}) = {got:x?}");
+                }
+                let addr = got;
                 match addr {
                     Some(a) => {
                         write_bytes(
@@ -389,6 +460,7 @@ impl Kernel {
     }
 
     fn try_receive(&mut self, msg: u32, rcv_size: u32, name: u32) -> Option<u32> {
+        self.fire_timers();
         let candidates: Vec<u32> = match self.ipc.ports.get(&name) {
             Some(p) if p.is_set => self
                 .ipc
@@ -418,26 +490,54 @@ impl Kernel {
     }
 }
 
-/// The bootstrap port (launchd). Lookups of services we do not provide fail.
+/// The bootstrap port (launchd's job server). There is a single task, so
+/// services registered or checked in are simply looked up by name.
 pub fn bootstrap_msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
+    const BOOTSTRAP_UNKNOWN_SERVICE: u32 = 1102;
+    const MACH_MSG_TYPE_PORT_RECEIVE: u32 = 16;
     let id = le(msg, 20);
-    let name_at = |o: usize| {
-        let s = &msg[o..(o + 128).min(msg.len())];
-        String::from_utf8_lossy(&s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())])
-            .into_owned()
+    let descs = if le(msg, 0) & 0x80000000 != 0 {
+        4 + 12 * le(msg, 24) as usize
+    } else {
+        0
+    };
+    let name_off = 24 + descs + 8;
+    let name = {
+        let s = &msg[name_off.min(msg.len())..(name_off + 128).min(msg.len())];
+        let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+        String::from_utf8_lossy(&s[..end]).into_owned()
     };
     match id {
-        // bootstrap_look_up(bp, name[128])
-        404 | 402 => {
-            log!(
-                "xnu: bootstrap_look_up({:?}) - no such service",
-                name_at(32)
-            );
-            Some(reply(msg, &[1102], &[])) // BOOTSTRAP_UNKNOWN_SERVICE
+        // bootstrap_check_in: hands out the receive right for a service.
+        402 => {
+            let port = *k.ipc.services.entry(name.clone()).or_insert(0);
+            let port = if port == 0 {
+                let p = k.ipc.new_port();
+                k.ipc.services.insert(name.clone(), p);
+                p
+            } else {
+                port
+            };
+            log_dbg!("xnu: bootstrap_check_in({name:?}) = {port:#x}");
+            Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_RECEIVE)]))
         }
+        // bootstrap_register(name, service_port)
+        403 => {
+            let port = le(msg, 28);
+            log_dbg!("xnu: bootstrap_register({name:?}, {port:#x})");
+            k.ipc.services.insert(name, port);
+            Some(reply(msg, &[KERN_SUCCESS], &[]))
+        }
+        // bootstrap_look_up
+        404 => match k.ipc.services.get(&name) {
+            Some(&port) => Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_SEND)])),
+            None => {
+                log!("xnu: bootstrap_look_up({name:?}): no such service");
+                Some(reply(msg, &[BOOTSTRAP_UNKNOWN_SERVICE], &[]))
+            }
+        },
         _ => {
             log!("xnu: unhandled bootstrap request {id}");
-            let _ = k;
             Some(reply(msg, &[MIG_BAD_ID], &[]))
         }
     }
@@ -455,20 +555,26 @@ pub fn trap(k: &mut Kernel, num: u32) -> Option<u32> {
         28 => Some(k.ipc.task_port),           // task_self_trap
         29 => Some(k.ipc.host_port),           // host_self_trap
         31 => k.mach_msg(),
-        33 | 34 => {
-            // semaphore_signal(_all)
-            let port = k.arg(0);
-            if let Some(Some(KObject::Semaphore { count })) =
-                k.ipc.ports.get_mut(&port).map(|p| p.kobject.as_mut())
-            {
-                *count += 1;
-            }
+        // semaphore_signal, semaphore_signal_all, semaphore_signal_thread
+        33..=35 => {
+            k.semaphore_signal(k.arg(0));
             Some(KERN_SUCCESS)
         }
-        36 | 38 => {
+        // semaphore_wait, semaphore_wait_signal, semaphore_timedwait,
+        // semaphore_timedwait_signal(wait, signal, sec, nsec)
+        36..=39 => {
             let port = k.arg(0);
-            let deadline = (num == 38).then(|| {
-                k.absolute_time() + (k.arg(1) as u64 * 1_000_000_000 + k.arg(2) as u64) * 3 / 125
+            let (signal, time_args) = match num {
+                37 => (k.arg(1), None),
+                38 => (0, Some((k.arg(1), k.arg(2)))),
+                39 => (k.arg(1), Some((k.arg(2), k.arg(3)))),
+                _ => (0, None),
+            };
+            if signal != 0 {
+                k.semaphore_signal(signal);
+            }
+            let deadline = time_args.map(|(sec, nsec)| {
+                k.absolute_time() + (sec as u64 * 1_000_000_000 + nsec as u64) * 3 / 125
             });
             let block = Block::Semaphore { port, deadline };
             if retry_blocked(k, &block) {
@@ -476,6 +582,43 @@ pub fn trap(k: &mut Kernel, num: u32) -> Option<u32> {
             } else {
                 k.current_thread().blocked = Some(block);
                 None
+            }
+        }
+        // mk_timer_create
+        91 => {
+            let port = k.ipc.new_port();
+            k.ipc.timers.insert(port, None);
+            Some(port)
+        }
+        // mk_timer_destroy
+        92 => {
+            k.ipc.timers.remove(&k.arg(0));
+            Some(KERN_SUCCESS)
+        }
+        // mk_timer_arm(port, expire_time)
+        93 => {
+            let deadline = k.arg(1) as u64 | (k.arg(2) as u64) << 32;
+            match k.ipc.timers.get_mut(&k.arg(0)) {
+                Some(t) => {
+                    *t = Some(deadline);
+                    Some(KERN_SUCCESS)
+                }
+                None => Some(KERN_INVALID_ARGUMENT),
+            }
+        }
+        // mk_timer_cancel(port, &result_time)
+        94 => {
+            let (port, out) = (k.arg(0), k.arg(1));
+            match k.ipc.timers.get_mut(&port) {
+                Some(t) => {
+                    let old = t.take().unwrap_or(0);
+                    if out != 0 {
+                        write_u32(&mut k.mem, out, old as u32);
+                        write_u32(&mut k.mem, out + 4, (old >> 32) as u32);
+                    }
+                    Some(KERN_SUCCESS)
+                }
+                None => Some(KERN_INVALID_ARGUMENT),
             }
         }
         89 => {
@@ -490,7 +633,11 @@ pub fn trap(k: &mut Kernel, num: u32) -> Option<u32> {
             k.current_thread().blocked = Some(Block::Sleep { deadline });
             None
         }
-        59..=61 => Some(KERN_SUCCESS), // thread_switch, swtch, swtch_pri
+        // thread_switch, swtch, swtch_pri
+        59..=61 => {
+            k.yield_requested = true;
+            Some(KERN_SUCCESS)
+        }
         _ => {
             log!(
                 "xnu: unimplemented Mach trap -{num} (lr {:#x})",
@@ -527,6 +674,18 @@ pub fn retry_blocked(k: &mut Kernel, block: &Block) -> bool {
             }
             false
         }
+        Block::SemWait { port, .. } => {
+            let sem = Block::Semaphore {
+                port,
+                deadline: None,
+            };
+            if port != 0 && retry_blocked(k, &sem) {
+                k.set_bsd_result(Ok(0));
+                true
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }
@@ -535,6 +694,7 @@ pub fn timeout_blocked(k: &mut Kernel, block: &Block) {
     k.cpu.regs_mut()[0] = match block {
         Block::MachReceive { .. } => MACH_RCV_TIMED_OUT,
         Block::Semaphore { .. } => 49, // KERN_OPERATION_TIMED_OUT
+        Block::SemWait { .. } => return k.set_bsd_result(Err(60)), // ETIMEDOUT
         _ => 60,                       // ETIMEDOUT
     };
 }
@@ -547,6 +707,98 @@ pub fn bsd_extra(k: &mut Kernel, num: u32) -> Option<Ret> {
             k.bsdthread_start = k.arg(0);
             k.pthread_size = k.arg(2);
             Some(Ret::Ok(0, 0))
+        }
+        // bsdthread_create(func, func_arg, stack, pthread, flags)
+        360 => {
+            const PTHREAD_START_CUSTOM: u32 = 0x01000000;
+            let (func, func_arg, stack, pthread, flags) =
+                (k.arg(0), k.arg(1), k.arg(2), k.arg(3), k.arg(4));
+            let (sp, pthread) = if flags & PTHREAD_START_CUSTOM != 0 {
+                (stack, pthread)
+            } else {
+                // The kernel allocates guard page, stack and pthread_t.
+                let guard = super::vm::PAGE;
+                let size = guard + stack + k.pthread_size;
+                let Some(base) =
+                    k.vm.map_anywhere(0, size, 0, super::vm::Prot::RW, "thread stack".into())
+                else {
+                    return Some(Ret::Err(12)); // ENOMEM
+                };
+                let size = super::vm::round_up(size);
+                super::write_bytes(&mut k.mem, base, &vec![0; size as usize]);
+                let top = base + guard + stack;
+                (top, top)
+            };
+            let start = k.bsdthread_start;
+            let port = k.spawn_thread(start, sp, pthread, |port| {
+                [pthread, port, func, func_arg, stack, flags]
+            });
+            log_dbg!("xnu: bsdthread_create({func:#x}) = {pthread:#x}, port {port:#x}");
+            Some(Ret::Ok(pthread, 0))
+        }
+        // bsdthread_terminate(stackaddr, freesize, port, sem)
+        361 => {
+            let (stack, size) = (k.arg(0), k.arg(1));
+            if size != 0 {
+                k.vm.unmap(stack, size);
+            }
+            if k.arg(3) != 0 {
+                k.semaphore_signal(k.arg(3));
+            }
+            k.current_thread().exited = true;
+            Some(Ret::Ok(0, 0))
+        }
+        // statfs64(path, buf), fstatfs64(fd, buf): one HFS+ volume
+        345 | 346 => {
+            let buf = k.arg(1);
+            let mut st = vec![0u8; 2168];
+            st[0..4].copy_from_slice(&4096u32.to_le_bytes()); // f_bsize
+            st[4..8].copy_from_slice(&4096u32.to_le_bytes()); // f_iosize
+            for (off, v) in [
+                (8, 1u64 << 20),
+                (16, 1 << 19),
+                (24, 1 << 19),
+                (32, 1 << 20),
+                (40, 1 << 19),
+            ] {
+                st[off..off + 8].copy_from_slice(&v.to_le_bytes());
+            }
+            st[72..75].copy_from_slice(b"hfs");
+            st[88] = b'/';
+            st[1112..1121].copy_from_slice(b"/dev/disk");
+            super::write_bytes(&mut k.mem, buf, &st);
+            Some(Ret::Ok(0, 0))
+        }
+        // __semwait_signal(cond_sem, mutex_sem, timeout, relative, tv_sec,
+        // tv_nsec), and its _nocancel twin
+        334 | 423 => {
+            let (cond, mutex) = (k.arg(0), k.arg(1));
+            if mutex != 0 {
+                k.semaphore_signal(mutex);
+            }
+            let deadline = (k.arg(2) != 0).then(|| {
+                // tv_sec is 64-bit, so it takes r4-r5 and tv_nsec r6.
+                let sec = k.arg(4) as u64 | (k.arg(5) as u64) << 32;
+                let ns = sec * 1_000_000_000 + k.arg(6) as u64;
+                let ns = if k.arg(3) != 0 {
+                    ns
+                } else {
+                    ns.saturating_sub(k.guest_unix_ns())
+                };
+                k.absolute_time() + ns * 3 / 125
+            });
+            if cond == 0 && deadline.is_none() {
+                return Some(Ret::Err(22)); // EINVAL
+            }
+            let block = Block::SemWait {
+                port: cond,
+                deadline,
+            };
+            if retry_blocked(k, &block) {
+                return Some(Ret::Ok(0, 0));
+            }
+            k.current_thread().blocked = Some(block);
+            Some(Ret::Blocked)
         }
         367 | 368 => Some(Ret::Err(45)),
         _ => {

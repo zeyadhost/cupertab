@@ -69,10 +69,18 @@ pub enum Block {
     Sleep {
         deadline: u64,
     },
+    /// __semwait_signal: a BSD syscall, so it reports through the carry
+    /// flag. `port` 0 is a plain timed sleep.
+    SemWait {
+        port: u32,
+        deadline: Option<u64>,
+    },
 }
 
 pub struct Thread {
     pub id: u32,
+    /// thread_selfid: unique for the task's lifetime, unlike `id`.
+    pub tid: u64,
     pub port: u32,
     context: Option<Box<CpuContext>>,
     tls: u32,
@@ -94,6 +102,9 @@ pub struct Kernel {
     pub bsdthread_start: u32,
     pub pthread_size: u32,
     pub trace: bool,
+    /// Set by thread_switch/swtch so another thread runs next.
+    pub yield_requested: bool,
+    next_tid: u64,
 }
 
 impl Kernel {
@@ -156,6 +167,7 @@ impl Kernel {
             ipc,
             threads: vec![Thread {
                 id: 0,
+                tid: 0,
                 port: thread_port,
                 context: None,
                 tls: 0,
@@ -168,6 +180,8 @@ impl Kernel {
             bsdthread_start: 0,
             pthread_size: 0,
             trace: std::env::var_os("TOUCHHLE_XNU_TRACE").is_some(),
+            yield_requested: false,
+            next_tid: 1,
         })
     }
 
@@ -242,12 +256,64 @@ impl Kernel {
         self.cpu.swap_context(&mut ctx);
         // ctx now holds the old thread's state
         let next_ctx = self.threads[idx].context.take();
-        self.threads[self.current].context = Some(ctx);
+        let cur = &mut self.threads[self.current];
+        if cur.exited {
+            // A finished thread's context and port are freed; its slot is
+            // reused by the next spawn_thread.
+            let port = cur.port;
+            self.ipc.ports.remove(&port);
+        } else {
+            cur.context = Some(ctx);
+        }
         if let Some(mut next_ctx) = next_ctx {
             self.cpu.swap_context(&mut next_ctx);
         }
         self.cpu.set_tls(self.threads[idx].tls);
         self.current = idx;
+    }
+
+    /// Creates a runnable thread starting at `pc` with stack `sp` and TLS
+    /// `tls`. `regs` gets the new thread's port and returns r0-r5.
+    pub fn spawn_thread(
+        &mut self,
+        pc: u32,
+        sp: u32,
+        tls: u32,
+        regs: impl FnOnce(u32) -> [u32; 6],
+    ) -> u32 {
+        let reuse = (0..self.threads.len()).find(|&i| {
+            i != self.current && self.threads[i].exited && self.threads[i].context.is_none()
+        });
+        let id = reuse.unwrap_or(self.threads.len()) as u32;
+        let port = self.ipc.new_kernel_port(mach::KObject::Thread(id));
+        let mut ctx = Box::new(CpuContext::new());
+        // Build the context on the CPU, then swap the current thread back.
+        self.cpu.swap_context(&mut ctx);
+        for (i, v) in regs(port).into_iter().enumerate() {
+            self.cpu.regs_mut()[i] = v;
+        }
+        self.cpu.regs_mut()[Cpu::SP] = sp;
+        self.cpu.regs_mut()[Cpu::LR] = 0;
+        self.cpu.regs_mut()[Cpu::PC] = pc & !1;
+        self.cpu
+            .set_cpsr(Cpu::CPSR_USER_MODE | if pc & 1 != 0 { Cpu::CPSR_THUMB } else { 0 });
+        self.cpu.swap_context(&mut ctx);
+        let tid = self.next_tid;
+        self.next_tid += 1;
+        let thread = Thread {
+            id,
+            tid,
+            port,
+            context: Some(ctx),
+            tls,
+            blocked: None,
+            exited: false,
+        };
+        match reuse {
+            Some(i) => self.threads[i] = thread,
+            None => self.threads.push(thread),
+        }
+        port
     }
 
     pub fn current_thread(&mut self) -> &mut Thread {
@@ -285,7 +351,9 @@ impl Kernel {
                     false
                 }
             }
-            Block::MachReceive { deadline, .. } | Block::Semaphore { deadline, .. } => {
+            Block::MachReceive { deadline, .. }
+            | Block::Semaphore { deadline, .. }
+            | Block::SemWait { deadline, .. } => {
                 if mach::retry_blocked(self, block) {
                     true
                 } else if deadline.is_some_and(|d| now >= d) {
@@ -331,7 +399,14 @@ impl Kernel {
                         self.switch_to(idx);
                     }
                 }
-                CpuState::Svc(0x80) => self.syscall(),
+                CpuState::Svc(0x80) => {
+                    self.syscall();
+                    if std::mem::take(&mut self.yield_requested) {
+                        if let Some(idx) = self.pick_thread() {
+                            self.switch_to(idx);
+                        }
+                    }
+                }
                 CpuState::Svc(other) => {
                     return Err(format!(
                         "Unexpected svc {other:#x} at {:#x}",
@@ -425,6 +500,11 @@ impl Kernel {
                     let cpsr = self.cpu.cpsr() & !(1 << 29);
                     self.cpu.set_cpsr(cpsr);
                 }
+                bsd::Ret::Blocked => {
+                    if self.trace {
+                        echo!("xnu:   blocked");
+                    }
+                }
                 bsd::Ret::Err(errno) => {
                     if self.trace {
                         echo!("xnu:   = errno {errno}");
@@ -438,6 +518,12 @@ impl Kernel {
     }
 
     /// Syscall argument `i`: r0-r6, then the stack (as saved by the wrapper).
+    /// The guest's wall clock in Unix nanoseconds. It starts in late 2010,
+    /// around when iOS 4.2 shipped, and advances with `now_ns`.
+    pub fn guest_unix_ns(&self) -> u64 {
+        self.now_ns() + 1_290_000_000_000_000_000
+    }
+
     pub fn arg(&self, i: usize) -> u32 {
         if i < 7 {
             self.cpu.regs()[i]

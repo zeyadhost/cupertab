@@ -13,6 +13,8 @@ use super::{read_bytes, read_cstr, read_u32, write_bytes, write_u32, Kernel};
 pub enum Ret {
     Ok(u32, u32),
     Err(u32),
+    /// The thread blocked; its result is set when it wakes.
+    Blocked,
 }
 
 const ENOMEM: u32 = 12;
@@ -445,7 +447,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             }
         }
         116 => {
-            let us = k.now_ns() / 1000 + 1_290_000_000_000_000;
+            let us = k.guest_unix_ns() / 1000;
             if args[0] != 0 {
                 write_u32(&mut k.mem, args[0], (us / 1_000_000) as u32);
                 write_u32(&mut k.mem, args[0] + 4, (us % 1_000_000) as u32);
@@ -561,7 +563,11 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         327 => ok(0), // issetugid
         336 => Ret::Err(ENOTSUP),
-        372 => ok(k.threads[k.current].id + 100), // thread_selfid
+        // thread_selfid
+        372 => {
+            let tid = k.threads[k.current].tid + 100;
+            Ret::Ok(tid as u32, (tid >> 32) as u32)
+        }
         _ => super::mach::bsd_extra(k, num).unwrap_or_else(|| {
             log!(
                 "xnu: unimplemented syscall {num} (r0-r3 {:#x} {:#x} {:#x} {:#x}, lr {:#x})",

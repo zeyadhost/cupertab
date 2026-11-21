@@ -87,6 +87,10 @@ impl VmMap {
         loop {
             addr = (addr + align - 1) & !(align - 1);
             if addr as u64 + size as u64 > self.high as u64 {
+                // Like XNU, a hint with no room above it wraps to the bottom.
+                if hint > self.low {
+                    return self.map_anywhere(0, size, align_mask, prot, tag);
+                }
                 return None;
             }
             match self.regions.range(..addr.saturating_add(size)).next_back() {

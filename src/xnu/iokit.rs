@@ -27,6 +27,13 @@ pub struct Entry {
     pub props: Vec<(String, Prop)>,
 }
 
+impl Entry {
+    /// Every entry is an `IOService`, which is an `IORegistryEntry`.
+    pub fn conforms_to(&self, class: &str) -> bool {
+        self.class == class || class == "IOService" || class == "IORegistryEntry"
+    }
+}
+
 pub struct Registry {
     pub entries: Vec<Entry>,
 }
@@ -125,7 +132,7 @@ impl Registry {
         (0..self.entries.len())
             .filter(|&i| {
                 let e = &self.entries[i];
-                class.is_none_or(|c| e.class == c) && name.is_none_or(|n| e.name == n)
+                class.is_none_or(|c| e.conforms_to(c)) && name.is_none_or(|n| e.name == n)
             })
             .collect()
     }
@@ -265,9 +272,7 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
         // io_object_conforms_to(object, class)
         (2801, KObject::IoEntry(e)) => {
             let (class, _) = in_string(msg, ARGS);
-            let entry = &k.iokit.entries[e];
-            let conforms =
-                entry.class == class || class == "IOService" || class == "IORegistryEntry";
+            let conforms = k.iokit.entries[e].conforms_to(&class);
             Some(reply(msg, &[KERN_SUCCESS, conforms as u32], &[]))
         }
         // io_registry_entry_get_name(entry)

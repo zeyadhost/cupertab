@@ -222,8 +222,9 @@ impl Kernel {
         } else {
             0
         };
-        let body = &msg[24 + descs..];
-        let arg = |i: usize| le(body, 8 + 4 * i);
+        // The guest sizes the request, so a word past its end reads as 0.
+        let body = msg.get(24 + descs..).unwrap_or(&[]);
+        let arg = |i: usize| body.get(8 + 4 * i..12 + 4 * i).map_or(0, |b| le(b, 0));
         let r = |kr: u32| Some(reply(msg, &[kr], &[]));
         if matches!(
             obj,

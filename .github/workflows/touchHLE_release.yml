@@ -172,8 +172,10 @@ jobs:
     - name: Lint
       run: dev-scripts/lint.sh ndk -t arm64-v8a
       env:
-        # GCC 15 on ubuntu-latest defaults to C23, which SDL2 doesn't build with.
+        # The host build for `cargo doc` uses GCC 15 on ubuntu-latest: SDL2
+        # doesn't build as C23 (its default) and openal-soft needs <cstdint>.
         CFLAGS: '-std=gnu17'
+        CXXFLAGS: '-include cstdint'
         # The version should match the ndkVersion defined in `android\app\build.gradle`
         ANDROID_NDK_ROOT: '/usr/local/lib/android/sdk/ndk/25.2.9519653'
         ANDROID_NDK: '/usr/local/lib/android/sdk/ndk/25.2.9519653'

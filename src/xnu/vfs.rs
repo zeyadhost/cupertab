@@ -128,7 +128,11 @@ impl Vfs {
         let mut p = self.overlay.clone();
         for c in path.split('/') {
             if !c.is_empty() && c != "." && c != ".." {
-                p.push(c.replace('%', "%25").replace(':', "%3A").replace('\\', "%5C"));
+                p.push(
+                    c.replace('%', "%25")
+                        .replace(':', "%3A")
+                        .replace('\\', "%5C"),
+                );
             }
         }
         p
@@ -263,9 +267,6 @@ impl Vfs {
             }));
         }
         let canon = self.canonical(fw, path);
-        if flags & O_CREAT != 0 {
-            self.deleted.remove(&canon);
-        }
         let writing = flags & 3 != 0 || flags & (O_CREAT | O_TRUNC) != 0;
         let existing = self.resolve(fw, &canon, true);
         if existing.is_some() && flags & O_CREAT != 0 && flags & O_EXCL != 0 {
@@ -311,6 +312,7 @@ impl Vfs {
                 FileKind::Host(opts.open(&host).map_err(|_| EACCES)?)
             }
         };
+        self.deleted.remove(&canon);
         Ok(self.alloc_fd(OpenFile {
             kind,
             offset: 0,

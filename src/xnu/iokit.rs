@@ -15,6 +15,7 @@ use crate::firmware::IpswInfo;
 
 const KIO_RETURN_NOT_FOUND: u32 = 0xe00002f0;
 const KIO_RETURN_UNSUPPORTED: u32 = 0xe00002c7;
+const MIG_BAD_ARGUMENTS: u32 = (-304i32) as u32;
 
 pub enum Prop {
     Data(Vec<u8>),
@@ -262,17 +263,28 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
         // ool_input, ool_input_size, scalar_outputCnt, inband_outputCnt,
         // ool_output, ool_output_size)
         (2865, KObject::IoConnect(e)) => {
+            // The guest controls every count here, so check each against the
+            // message length.
+            let word = |o: usize| msg.get(o..o + 4).map(|b| le(b, 0));
+            let Some(n) = word(ARGS + 4).map(|n| n as usize).filter(|&n| n <= 16) else {
+                return err(MIG_BAD_ARGUMENTS);
+            };
+            let inband_at = ARGS + 8 + 8 * n;
+            let Some(inband_len) = word(inband_at).map(|n| n as usize).filter(|&n| n <= 4096)
+            else {
+                return err(MIG_BAD_ARGUMENTS);
+            };
+            let tail = inband_at + 4 + inband_len.div_ceil(4) * 4;
+            if msg.len() < tail + 24 {
+                return err(MIG_BAD_ARGUMENTS);
+            }
             let selector = le(msg, ARGS);
-            let n = (le(msg, ARGS + 4) as usize).min(16);
             let scalars: Vec<u64> = (0..n)
                 .map(|i| {
                     le(msg, ARGS + 8 + 8 * i) as u64 | (le(msg, ARGS + 12 + 8 * i) as u64) << 32
                 })
                 .collect();
-            let inband_at = ARGS + 8 + 8 * n;
-            let inband_len = le(msg, inband_at) as usize;
             let inband = &msg[inband_at + 4..][..inband_len];
-            let tail = inband_at + 4 + inband_len.div_ceil(4) * 4;
             let scalar_out_max = le(msg, tail + 8) as usize;
             let inband_out_max = le(msg, tail + 12) as usize;
             let class = k.iokit.entries[e].class.clone();

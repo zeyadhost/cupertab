@@ -14,6 +14,7 @@ use super::{read_bytes, read_u32, write_bytes, write_u32, Block, Kernel};
 use std::collections::{HashMap, VecDeque};
 
 pub const KERN_SUCCESS: u32 = 0;
+pub const KERN_INVALID_ADDRESS: u32 = 1;
 pub const KERN_INVALID_ARGUMENT: u32 = 4;
 pub const KERN_NO_SPACE: u32 = 3;
 pub const KERN_INVALID_NAME: u32 = 15;
@@ -426,6 +427,30 @@ impl Kernel {
                 self.vm.unmap(addr, size);
                 r(KERN_SUCCESS)
             }
+            // vm_copy / mach_vm_copy(task, src, size, dst), 32-bit addresses
+            3808 | 4807 => {
+                let (src, size, dst) = (arg(0), arg(1), arg(2));
+                // Every page of both ranges has to be mapped.
+                let mapped = |a: u32| {
+                    let end = a as u64 + size as u64;
+                    let mut at = a as u64;
+                    while at < end {
+                        match self.vm.region_at(at as u32) {
+                            Some((base, region)) if a != 0 && end <= 1 << 32 => {
+                                at = base as u64 + region.size as u64;
+                            }
+                            _ => return false,
+                        }
+                    }
+                    true
+                };
+                if !mapped(src) || !mapped(dst) {
+                    return r(KERN_INVALID_ADDRESS);
+                }
+                let bytes = read_bytes(&self.mem, src, size);
+                write_bytes(&mut self.mem, dst, &bytes);
+                r(KERN_SUCCESS)
+            }
             // vm_protect / mach_vm_protect
             3803 | 4802 => r(KERN_SUCCESS),
             // host_info, host_statistics, task_info, thread_info: zeros
@@ -465,6 +490,24 @@ impl Kernel {
             // thread_policy_set, thread_set_exception_ports,
             // task_set_exception_ports
             3413 | 3613 | 3616 | 3617 => r(KERN_SUCCESS),
+            // thread_get_state(thread, flavor, &state, &count)
+            3603 => {
+                const ARM_THREAD_STATE: u32 = 1;
+                let KObject::Thread(t) = obj else {
+                    return r(KERN_INVALID_ARGUMENT);
+                };
+                if arg(0) != ARM_THREAD_STATE || arg(1) < 17 {
+                    return r(KERN_INVALID_ARGUMENT);
+                }
+                match self.thread_regs(t as usize) {
+                    Some(state) => {
+                        let mut words = vec![KERN_SUCCESS, 17];
+                        words.extend(state);
+                        Some(reply(msg, &words, &[]))
+                    }
+                    None => r(KERN_INVALID_ARGUMENT),
+                }
+            }
             // mach_ports_lookup: no registered ports
             3404 => r(5),
             _ => {

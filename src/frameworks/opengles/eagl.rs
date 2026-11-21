@@ -590,6 +590,7 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     let mut texture: GLuint = 0;
     gles.GenTextures(1, &mut texture);
     gles.BindTexture(gles11::TEXTURE_2D, texture);
+    #[cfg(not(target_os = "emscripten"))]
     gles.CopyTexImage2D(
         gles11::TEXTURE_2D,
         0,
@@ -600,6 +601,32 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
         height,
         0,
     );
+    // gl4es's glCopyTexImage2D() doesn't read from renderbuffers on WebGL,
+    // so read the pixels back and upload them instead.
+    #[cfg(target_os = "emscripten")]
+    {
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        gles.ReadPixels(
+            0,
+            0,
+            width,
+            height,
+            gles11::RGBA,
+            gles11::UNSIGNED_BYTE,
+            pixels.as_mut_ptr() as *mut _,
+        );
+        gles.TexImage2D(
+            gles11::TEXTURE_2D,
+            0,
+            gles11::RGBA as _,
+            width,
+            height,
+            0,
+            gles11::RGBA,
+            gles11::UNSIGNED_BYTE,
+            pixels.as_ptr() as *const _,
+        );
+    }
     // The texture will not have any mip levels so we must ensure the filter
     // does not use them, else rendering will fail.
     gles.TexParameteri(

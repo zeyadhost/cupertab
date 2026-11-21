@@ -618,7 +618,8 @@ impl Kernel {
         // MACH_RCV_TRAILER_ELEMENTS: the null, seqno, sender (security token),
         // audit, context and MAC trailers. launchd's MIG replies are checked
         // for the audit one. Every sender is the kernel or this one task, so
-        // the tokens are all zero.
+        // the tokens are zero apart from the audit token's PID, which servers
+        // such as UIKit's status bar compare with getpid().
         let trailer_size = match (option >> 24) & 0xf {
             0 => 8,
             1 => 12,
@@ -649,6 +650,10 @@ impl Kernel {
                 write_bytes(&mut self.mem, msg, &m);
                 let mut trailer = vec![0u8; trailer_size as usize];
                 trailer[4..8].copy_from_slice(&trailer_size.to_le_bytes());
+                if trailer_size >= 52 {
+                    // audit_token_t starts at offset 20; its sixth word is the PID
+                    trailer[40..44].copy_from_slice(&1u32.to_le_bytes());
+                }
                 write_bytes(&mut self.mem, msg + m.len() as u32, &trailer);
                 // msgh_local_port of the received message is the port it came
                 // on

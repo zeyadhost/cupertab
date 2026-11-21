@@ -185,7 +185,11 @@ impl Kernel {
     }
 
     fn path_arg(&self, i: usize) -> String {
-        read_cstr(&self.mem, self.arg(i))
+        let path = read_cstr(&self.mem, self.arg(i));
+        if self.trace {
+            echo!("xnu:   path {path:?}");
+        }
+        path
     }
 
     fn do_read(&mut self, fd: u32, buf: u32, len: u32, offset: Option<u64>) -> Ret {

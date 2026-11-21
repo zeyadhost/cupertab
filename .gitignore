@@ -2,6 +2,7 @@
 /vendor/boost
 /touchHLE_sandbox
 /touchHLE_apps
+/touchHLE_firmware
 touchHLE_log.txt
 touchHLE_wallpaper.*
 

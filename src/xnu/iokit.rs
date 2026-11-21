@@ -330,13 +330,17 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
         (2818, KObject::IoConnect(_)) => err(KERN_SUCCESS),
         // io_service_add_notification(master, notification_type, matching,
         // wake_port, reference): a complex request, so the strings follow the
-        // port descriptor and NDR. Services never appear or go away, so the
-        // iterator holds the current matches and the wake port is never
-        // sent to.
+        // port descriptor and NDR. Services never appear or go away, so a
+        // publish notification's iterator holds the current matches, a
+        // termination one is empty, and the wake port is never sent to.
         (2849, KObject::IoMaster) => {
-            let (_kind, next) = in_string(msg, 48);
+            let (kind, next) = in_string(msg, 48);
             let (dict, _) = in_string(msg, next);
-            let items = k.iokit.matching(&dict);
+            let items = if kind.contains("Terminate") {
+                Vec::new()
+            } else {
+                k.iokit.matching(&dict)
+            };
             port_reply(k.ipc.new_kernel_port(KObject::IoIterator { items, pos: 0 }))
         }
         // io_service_add_interest_notification(service, type_of_interest,

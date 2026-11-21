@@ -222,8 +222,9 @@ impl Kernel {
         } else {
             0
         };
-        let body = &msg[24 + descs..];
-        let arg = |i: usize| le(body, 8 + 4 * i);
+        // The guest sizes the request, so a word past its end reads as 0.
+        let body = msg.get(24 + descs..).unwrap_or(&[]);
+        let arg = |i: usize| body.get(8 + 4 * i..12 + 4 * i).map_or(0, |b| le(b, 0));
         let r = |kr: u32| Some(reply(msg, &[kr], &[]));
         if matches!(
             obj,
@@ -290,6 +291,22 @@ impl Kernel {
                     }
                 }
                 r(KERN_SUCCESS)
+            }
+            // mach_port_get_attributes(task, name, flavor, &info, &count): the
+            // queue limit, receive status or dead-name table size, as XNU
+            // reports them for a fresh port.
+            3217 => {
+                const QLIMIT_DEFAULT: u32 = 5;
+                let info: &[u32] = match arg(1) {
+                    1 => &[QLIMIT_DEFAULT],
+                    2 => &[0, 0, 0, QLIMIT_DEFAULT, 0, 0, 0, 0, 0, 0],
+                    3 => &[0],
+                    _ => return r(KERN_INVALID_ARGUMENT),
+                };
+                let count = info.len().min(arg(2) as usize);
+                let mut words = vec![KERN_SUCCESS, count as u32];
+                words.extend_from_slice(&info[..count]);
+                Some(reply(msg, &words, &[]))
             }
             // mach_port_insert_right, set_attributes and the like
             3214..=3230 => r(KERN_SUCCESS),

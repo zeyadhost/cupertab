@@ -2,7 +2,7 @@ name: Web build
 
 on:
   push:
-    branches: [main]
+    branches: [trunk]
   pull_request:
   workflow_dispatch:
 
@@ -37,7 +37,7 @@ jobs:
           path: web/dist
 
   deploy:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/trunk'
     needs: build
     runs-on: ubuntu-24.04
     environment:

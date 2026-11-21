@@ -30,7 +30,7 @@ python3 -m http.server -d web/dist 8080
 ```
 
 `.github/workflows/web.yml` runs the same build and deploys `web/dist` to GitHub
-Pages on every push to `main`.
+Pages on every push to `trunk`.
 
 ## Known limitations
 

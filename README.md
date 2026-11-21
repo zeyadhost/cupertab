@@ -1,3 +1,5 @@
+> **Web build:** this fork also runs touchHLE in the browser at https://zeyadhost.github.io/touchHLE-web/ (pick an `.ipa` you own). See [web/README.md](web/README.md).
+
 # touchHLE: high-level emulator for early iOS apps
 
 **touchHLE** is a high-level emulator for early iOS apps. It runs on modern desktop operating systems and Android, and is written in Rust.

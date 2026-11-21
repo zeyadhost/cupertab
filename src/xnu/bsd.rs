@@ -203,6 +203,29 @@ impl Kernel {
         }
     }
 
+    fn mmap_shm(
+        &mut self,
+        shm: std::rc::Rc<std::cell::RefCell<vfs::Shm>>,
+        size: u32,
+        prot: u32,
+    ) -> Ret {
+        let size = size.max(round_up(shm.borrow().size.min(u32::MAX as u64) as u32));
+        if let Some(addr) = shm.borrow().addr {
+            if !self.vm.is_free(addr, 1) {
+                return ok(addr);
+            }
+        }
+        let Some(base) = self
+            .vm
+            .map_anywhere(0, size, 0, Prot::from_bits(prot), "shm".into())
+        else {
+            return Ret::Err(ENOMEM);
+        };
+        write_bytes(&mut self.mem, base, &vec![0u8; size as usize]);
+        shm.borrow_mut().addr = Some(base);
+        ok(base)
+    }
+
     fn mmap(&mut self) -> Ret {
         let (addr, len, prot, flags, fd) = (
             self.arg(0),
@@ -218,6 +241,11 @@ impl Kernel {
             return Ret::Err(EINVAL);
         }
         let size = round_up(len);
+        if flags & MAP_ANON == 0 {
+            if let Some(FileKind::Shm(shm)) = self.vfs.fds.get(&fd).map(|f| &f.kind) {
+                return self.mmap_shm(shm.clone(), size, prot);
+            }
+        }
         // Read file contents before touching the address space, so a bad
         // descriptor leaves existing mappings intact.
         let contents = if flags & MAP_ANON == 0 {
@@ -459,6 +487,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                         FileKind::Null => Some(FileKind::Null),
                         FileKind::Random => Some(FileKind::Random),
                         FileKind::Kqueue(kq) => Some(FileKind::Kqueue(kq.clone())),
+                        FileKind::Shm(shm) => Some(FileKind::Shm(shm.clone())),
                         _ => None,
                     };
                     match dup {
@@ -502,7 +531,11 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         60 => ok(0o022),
         73 => {
-            k.vm.unmap(args[0], args[1]);
+            // Shared memory keeps its pages, so the next mapping sees what
+            // was written to it.
+            if !k.vfs.shm.values().any(|s| s.borrow().addr == Some(args[0])) {
+                k.vm.unmap(args[0], args[1]);
+            }
             ok(0)
         }
         74 => {
@@ -623,6 +656,44 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         196 => k.getdirentries(false),
         344 => k.getdirentries(true),
         197 => k.mmap(),
+        201 => {
+            let len = args[1] as u64 | (args[2] as u64) << 32;
+            match k.vfs.fds.get(&args[0]).map(|f| &f.kind) {
+                Some(FileKind::Shm(shm)) => {
+                    shm.borrow_mut().size = len;
+                    ok(0)
+                }
+                Some(FileKind::Host(file)) => match file.set_len(len) {
+                    Ok(()) => ok(0),
+                    Err(_) => Ret::Err(EINVAL),
+                },
+                Some(_) => Ret::Err(EINVAL),
+                None => Ret::Err(vfs::EBADF),
+            }
+        }
+        266 => {
+            const O_CREAT: u32 = 0x200;
+            const O_EXCL: u32 = 0x800;
+            let (name, oflag) = (read_cstr(&k.mem, args[0]), args[1]);
+            let shm = match k.vfs.shm.get(&name) {
+                Some(_) if oflag & O_CREAT != 0 && oflag & O_EXCL != 0 => {
+                    return Ret::Err(vfs::EEXIST)
+                }
+                Some(shm) => shm.clone(),
+                None if oflag & O_CREAT != 0 => k.vfs.shm.entry(name.clone()).or_default().clone(),
+                None => return Ret::Err(vfs::ENOENT),
+            };
+            ok(k.vfs.alloc_fd(OpenFile {
+                kind: FileKind::Shm(shm),
+                offset: 0,
+                path: name,
+                flags: oflag,
+            }))
+        }
+        267 => match k.vfs.shm.remove(&read_cstr(&k.mem, args[0])) {
+            Some(_) => ok(0),
+            None => Ret::Err(vfs::ENOENT),
+        },
         199 => {
             let fd = args[0];
             let off = (args[1] as u64 | (args[2] as u64) << 32) as i64;

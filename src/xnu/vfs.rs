@@ -63,6 +63,14 @@ pub struct UserEvent {
     pub triggered: bool,
 }
 
+/// A POSIX shared memory object. Every mapping of it in the one guest
+/// process shares the same pages.
+#[derive(Default)]
+pub struct Shm {
+    pub size: u64,
+    pub addr: Option<u32>,
+}
+
 pub enum FileKind {
     Firmware {
         node: u32,
@@ -81,6 +89,7 @@ pub enum FileKind {
     /// A kqueue, shared by its duplicated descriptors. Only `EVFILT_USER`
     /// events fire.
     Kqueue(std::rc::Rc<std::cell::RefCell<Kqueue>>),
+    Shm(std::rc::Rc<std::cell::RefCell<Shm>>),
 }
 
 pub struct OpenFile {
@@ -96,6 +105,8 @@ pub struct Vfs {
     pub cwd: String,
     /// Firmware paths deleted or renamed away by the guest.
     deleted: std::collections::HashSet<String>,
+    /// Shared memory objects by `shm_open` name.
+    pub shm: HashMap<String, std::rc::Rc<std::cell::RefCell<Shm>>>,
 }
 
 pub enum Resolved<'a> {
@@ -142,6 +153,7 @@ impl Vfs {
             fds,
             cwd: "/".into(),
             deleted: Default::default(),
+            shm: HashMap::new(),
         }
     }
 
@@ -420,7 +432,7 @@ impl Vfs {
                 buf.len()
             }
             FileKind::Socket(s) => s.read(buf),
-            FileKind::Kqueue(_) => return Err(EINVAL),
+            FileKind::Kqueue(_) | FileKind::Shm(_) => return Err(EINVAL),
             FileKind::Dir { .. } => return Err(EISDIR),
         };
         if offset.is_none() {
@@ -438,7 +450,7 @@ impl Vfs {
             }
             FileKind::Null | FileKind::Random => Ok(buf.len()),
             FileKind::Socket(s) => Ok(s.write(buf)),
-            FileKind::Kqueue(_) => Err(EINVAL),
+            FileKind::Kqueue(_) | FileKind::Shm(_) => Err(EINVAL),
             FileKind::Host(file) => {
                 let pos = if f.flags & O_APPEND != 0 {
                     file.seek(SeekFrom::End(0)).map_err(|_| EINVAL)?
@@ -476,6 +488,15 @@ impl Vfs {
                 })
             }
             FileKind::Dir { path, .. } => self.stat(fw, &path.clone(), true),
+            FileKind::Shm(shm) => Ok(Stat {
+                mode: 0o100600,
+                ino: 2000,
+                size: shm.borrow().size,
+                uid: 501,
+                gid: 501,
+                mtime: 0,
+                nlink: 1,
+            }),
             _ => Ok(Stat {
                 mode: 0o20666,
                 ino: 1000,

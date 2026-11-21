@@ -38,6 +38,21 @@ pub struct Stat {
     pub nlink: u16,
 }
 
+/// Registered `EVFILT_USER` events.
+#[derive(Default)]
+pub struct Kqueue {
+    pub user: Vec<UserEvent>,
+}
+
+pub struct UserEvent {
+    pub ident: u32,
+    pub udata: u32,
+    pub fflags: u32,
+    /// `EV_ONESHOT`, `EV_CLEAR` and `EV_DISABLE` as last registered.
+    pub flags: u16,
+    pub triggered: bool,
+}
+
 pub enum FileKind {
     Firmware {
         node: u32,
@@ -53,6 +68,8 @@ pub enum FileKind {
     Console,
     Random,
     Socket(Box<super::lockdown::Socket>),
+    /// A kqueue. Only `EVFILT_USER` events fire.
+    Kqueue(Box<Kqueue>),
 }
 
 pub struct OpenFile {
@@ -392,6 +409,7 @@ impl Vfs {
                 buf.len()
             }
             FileKind::Socket(s) => s.read(buf),
+            FileKind::Kqueue(_) => return Err(EINVAL),
             FileKind::Dir { .. } => return Err(EISDIR),
         };
         if offset.is_none() {
@@ -409,6 +427,7 @@ impl Vfs {
             }
             FileKind::Null | FileKind::Random => Ok(buf.len()),
             FileKind::Socket(s) => Ok(s.write(buf)),
+            FileKind::Kqueue(_) => Err(EINVAL),
             FileKind::Host(file) => {
                 let pos = if f.flags & O_APPEND != 0 {
                     file.seek(SeekFrom::End(0)).map_err(|_| EINVAL)?

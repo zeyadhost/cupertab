@@ -9,16 +9,12 @@ use std::process::Command;
 
 // adapted from `assert_cmd` crate
 fn target_dir() -> PathBuf {
-    env::current_exe()
-        .ok()
-        .map(|mut path| {
-            path.pop();
-            if path.ends_with("deps") {
-                path.pop();
-            }
-            path
-        })
+    // Cargo's newer build-dir layout no longer puts test executables next to
+    // the touchHLE binary, so ask Cargo where the binary is.
+    PathBuf::from(env!("CARGO_BIN_EXE_touchHLE"))
+        .parent()
         .unwrap()
+        .to_path_buf()
 }
 
 // https://stackoverflow.com/a/35907071/2241008

@@ -9,7 +9,8 @@
 
 fn main() -> Result<(), String> {
     let result = touchHLE::main(std::env::args());
-    // Let the web page know the emulator stopped, so it can offer to load another app.
+    // Let the web page know the emulator stopped, so it can offer to load
+    // another app.
     #[cfg(target_os = "emscripten")]
     {
         extern "C" {

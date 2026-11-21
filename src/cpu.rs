@@ -38,12 +38,12 @@ mod callbacks {
         addr: VAddr,
         error: *mut bool,
     ) -> T {
-        // If a panic occurs (probably due to a null-pointer access), we can't let
-        // it keep unwinding as it will hit non-Rust stack frames (dynarmic).
-        // Instead we catch the unwind and then tell the C++ code a problem occurred
-        // so it can immediately halt CPU execution and then panic itself, now
-        // with only Rust stack frames to worry about and with CPU state information
-        // available that's useful for debugging.
+        // If a panic occurs (probably due to a null-pointer access), we can't
+        // let it keep unwinding as it will hit non-Rust stack frames
+        // (dynarmic). Instead we catch the unwind and then tell the C++ code a
+        // problem occurred so it can immediately halt CPU execution and then
+        // panic itself, now with only Rust stack frames to worry about and
+        // with CPU state information available that's useful for debugging.
         //
         // TODO: Disable this in debug mode? This relies on dynarmic's
         // check_halt_on_memory_access option which surely has a significant

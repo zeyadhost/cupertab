@@ -13,6 +13,8 @@ use super::{read_bytes, read_cstr, read_u32, write_bytes, write_u32, Kernel};
 pub enum Ret {
     Ok(u32, u32),
     Err(u32),
+    /// The thread blocked; its result is set when it wakes.
+    Blocked,
 }
 
 const ENOMEM: u32 = 12;

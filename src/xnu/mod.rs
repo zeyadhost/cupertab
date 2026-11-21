@@ -69,6 +69,12 @@ pub enum Block {
     Sleep {
         deadline: u64,
     },
+    /// __semwait_signal: a BSD syscall, so it reports through the carry
+    /// flag. `port` 0 is a plain timed sleep.
+    SemWait {
+        port: u32,
+        deadline: Option<u64>,
+    },
 }
 
 pub struct Thread {
@@ -94,6 +100,8 @@ pub struct Kernel {
     pub bsdthread_start: u32,
     pub pthread_size: u32,
     pub trace: bool,
+    /// Set by thread_switch/swtch so another thread runs next.
+    pub yield_requested: bool,
 }
 
 impl Kernel {
@@ -168,6 +176,7 @@ impl Kernel {
             bsdthread_start: 0,
             pthread_size: 0,
             trace: std::env::var_os("TOUCHHLE_XNU_TRACE").is_some(),
+            yield_requested: false,
         })
     }
 
@@ -250,6 +259,40 @@ impl Kernel {
         self.current = idx;
     }
 
+    /// Creates a runnable thread starting at `pc` with stack `sp` and TLS
+    /// `tls`. `regs` gets the new thread's port and returns r0-r5.
+    pub fn spawn_thread(
+        &mut self,
+        pc: u32,
+        sp: u32,
+        tls: u32,
+        regs: impl FnOnce(u32) -> [u32; 6],
+    ) -> u32 {
+        let id = self.threads.len() as u32;
+        let port = self.ipc.new_kernel_port(mach::KObject::Thread(id));
+        let mut ctx = Box::new(CpuContext::new());
+        // Build the context on the CPU, then swap the current thread back.
+        self.cpu.swap_context(&mut ctx);
+        for (i, v) in regs(port).into_iter().enumerate() {
+            self.cpu.regs_mut()[i] = v;
+        }
+        self.cpu.regs_mut()[Cpu::SP] = sp;
+        self.cpu.regs_mut()[Cpu::LR] = 0;
+        self.cpu.regs_mut()[Cpu::PC] = pc & !1;
+        self.cpu
+            .set_cpsr(Cpu::CPSR_USER_MODE | if pc & 1 != 0 { Cpu::CPSR_THUMB } else { 0 });
+        self.cpu.swap_context(&mut ctx);
+        self.threads.push(Thread {
+            id,
+            port,
+            context: Some(ctx),
+            tls,
+            blocked: None,
+            exited: false,
+        });
+        port
+    }
+
     pub fn current_thread(&mut self) -> &mut Thread {
         &mut self.threads[self.current]
     }
@@ -285,7 +328,9 @@ impl Kernel {
                     false
                 }
             }
-            Block::MachReceive { deadline, .. } | Block::Semaphore { deadline, .. } => {
+            Block::MachReceive { deadline, .. }
+            | Block::Semaphore { deadline, .. }
+            | Block::SemWait { deadline, .. } => {
                 if mach::retry_blocked(self, block) {
                     true
                 } else if deadline.is_some_and(|d| now >= d) {
@@ -331,7 +376,14 @@ impl Kernel {
                         self.switch_to(idx);
                     }
                 }
-                CpuState::Svc(0x80) => self.syscall(),
+                CpuState::Svc(0x80) => {
+                    self.syscall();
+                    if std::mem::take(&mut self.yield_requested) {
+                        if let Some(idx) = self.pick_thread() {
+                            self.switch_to(idx);
+                        }
+                    }
+                }
                 CpuState::Svc(other) => {
                     return Err(format!(
                         "Unexpected svc {other:#x} at {:#x}",
@@ -424,6 +476,11 @@ impl Kernel {
                     self.cpu.regs_mut()[1] = r1;
                     let cpsr = self.cpu.cpsr() & !(1 << 29);
                     self.cpu.set_cpsr(cpsr);
+                }
+                bsd::Ret::Blocked => {
+                    if self.trace {
+                        echo!("xnu:   blocked");
+                    }
                 }
                 bsd::Ret::Err(errno) => {
                     if self.trace {

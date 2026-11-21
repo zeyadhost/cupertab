@@ -641,9 +641,9 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     gles.DeleteFramebuffersOES(1, &src_framebuffer);
 
     // glIsEnabled() is used rather than glGetBooleanv() because gl4es only
-    // answers the latter for state WebGL knows about, and reports fixed-function
-    // capabilities like GL_TEXTURE_2D as disabled. gl4es's glIsEnabled() can
-    // return any non-zero value for true, so normalize it.
+    // answers the latter for state WebGL knows about, and reports
+    // fixed-function capabilities like GL_TEXTURE_2D as disabled. gl4es's
+    // glIsEnabled() can return any non-zero value for true, so normalize it.
     //
     // Reset various things that could affect the quad or virtual cursor we're
     // going to draw. Back up the old state while doing so, so it can be

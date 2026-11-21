@@ -495,6 +495,12 @@ impl Kernel {
     }
 
     /// Syscall argument `i`: r0-r6, then the stack (as saved by the wrapper).
+    /// The guest's wall clock in Unix nanoseconds. It starts in late 2010,
+    /// around when iOS 4.2 shipped, and advances with `now_ns`.
+    pub fn guest_unix_ns(&self) -> u64 {
+        self.now_ns() + 1_290_000_000_000_000_000
+    }
+
     pub fn arg(&self, i: usize) -> u32 {
         if i < 7 {
             self.cpu.regs()[i]

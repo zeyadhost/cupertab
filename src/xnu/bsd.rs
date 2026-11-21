@@ -447,7 +447,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             }
         }
         116 => {
-            let us = k.now_ns() / 1000 + 1_290_000_000_000_000;
+            let us = k.guest_unix_ns() / 1000;
             if args[0] != 0 {
                 write_u32(&mut k.mem, args[0], (us / 1_000_000) as u32);
                 write_u32(&mut k.mem, args[0] + 4, (us % 1_000_000) as u32);

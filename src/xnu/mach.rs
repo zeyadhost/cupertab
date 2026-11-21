@@ -777,14 +777,13 @@ pub fn bsd_extra(k: &mut Kernel, num: u32) -> Option<Ret> {
                 k.semaphore_signal(mutex);
             }
             let deadline = (k.arg(2) != 0).then(|| {
-                let ns = k.arg(4) as u64 * 1_000_000_000 + k.arg(5) as u64;
+                // tv_sec is 64-bit, so it takes r4-r5 and tv_nsec r6.
+                let sec = k.arg(4) as u64 | (k.arg(5) as u64) << 32;
+                let ns = sec * 1_000_000_000 + k.arg(6) as u64;
                 let ns = if k.arg(3) != 0 {
                     ns
                 } else {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_nanos() as u64);
-                    ns.saturating_sub(now)
+                    ns.saturating_sub(k.guest_unix_ns())
                 };
                 k.absolute_time() + ns * 3 / 125
             });

@@ -452,6 +452,8 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                         FileKind::Firmware { node } => Some(FileKind::Firmware { node: *node }),
                         FileKind::Console => Some(FileKind::Console),
                         FileKind::Null => Some(FileKind::Null),
+                        FileKind::Random => Some(FileKind::Random),
+                        FileKind::Kqueue(kq) => Some(FileKind::Kqueue(kq.clone())),
                         _ => None,
                     };
                     match dup {
@@ -697,9 +699,11 @@ fn kevent(k: &mut Kernel, args: &[u32; 8]) -> Ret {
     let (changes, nchanges, events, nevents) = (args[1], args[2], args[3], args[4]);
     let mut out: Vec<[u32; 5]> = Vec::new();
     {
-        let Some(FileKind::Kqueue(kq)) = k.vfs.fds.get_mut(&args[0]).map(|f| &mut f.kind) else {
+        let Some(FileKind::Kqueue(kq)) = k.vfs.fds.get(&args[0]).map(|f| &f.kind) else {
             return Ret::Err(vfs::EBADF);
         };
+        let kq = kq.clone();
+        let mut kq = kq.borrow_mut();
         for i in 0..nchanges {
             let at = changes + i * KEVENT_SIZE;
             let ident = read_u32(&k.mem, at);

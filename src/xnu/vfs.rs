@@ -68,8 +68,9 @@ pub enum FileKind {
     Console,
     Random,
     Socket(Box<super::lockdown::Socket>),
-    /// A kqueue. Only `EVFILT_USER` events fire.
-    Kqueue(Box<Kqueue>),
+    /// A kqueue, shared by its duplicated descriptors. Only `EVFILT_USER`
+    /// events fire.
+    Kqueue(std::rc::Rc<std::cell::RefCell<Kqueue>>),
 }
 
 pub struct OpenFile {

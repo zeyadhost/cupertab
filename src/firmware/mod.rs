@@ -102,6 +102,10 @@ pub struct IpswInfo {
     pub product_version: String,
     pub build: String,
     pub rootfs_name: String,
+    /// The board (`n82ap`) and SoC (`s5l8900x`) from the first DeviceMap
+    /// entry; empty if Restore.plist has none.
+    pub board_config: String,
+    pub platform: String,
 }
 
 pub fn read_ipsw_info(ipsw_path: &Path) -> Result<IpswInfo, String> {
@@ -130,7 +134,21 @@ pub fn read_ipsw_info(ipsw_path: &Path) -> Result<IpswInfo, String> {
     if rootfs_name.is_empty() || rootfs_name.contains(['/', '\\']) || rootfs_name.starts_with('.') {
         return Err(format!("Bad root filesystem name {rootfs_name:?}"));
     }
+    let device = dict
+        .get("DeviceMap")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_dictionary());
+    let device_str = |key: &str| {
+        device
+            .and_then(|d| d.get(key))
+            .and_then(|v| v.as_string())
+            .unwrap_or("")
+            .to_string()
+    };
     Ok(IpswInfo {
+        board_config: device_str("BoardConfig"),
+        platform: device_str("Platform"),
         product_type: get("ProductType")?,
         product_version: get("ProductVersion")?,
         build: get("ProductBuildVersion")?,

@@ -11,6 +11,7 @@
 //! frameworks in Rust. Here, none of the guest code is reimplemented.
 
 mod bsd;
+mod iokit;
 mod loader;
 mod mach;
 mod vfs;
@@ -95,6 +96,7 @@ pub struct Kernel {
     pub fw: Firmware,
     pub vfs: vfs::Vfs,
     pub ipc: mach::Ipc,
+    pub iokit: iokit::Registry,
     pub threads: Vec<Thread>,
     pub current: usize,
     pub start: std::time::Instant,
@@ -158,12 +160,14 @@ impl Kernel {
 
         let mut ipc = mach::Ipc::new();
         let thread_port = ipc.new_kernel_port(mach::KObject::Thread(0));
+        let iokit = iokit::Registry::new(&fw.info);
         Ok(Kernel {
             mem,
             cpu,
             vm,
             fw,
             vfs: vfs::Vfs::new(overlay_dir),
+            iokit,
             ipc,
             threads: vec![Thread {
                 id: 0,

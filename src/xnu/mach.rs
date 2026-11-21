@@ -22,7 +22,7 @@ pub const MACH_RCV_TIMED_OUT: u32 = 0x10004003;
 pub const MACH_RCV_TOO_LARGE: u32 = 0x10004004;
 /// Disposition of a received send right.
 const MACH_MSG_TYPE_PORT_SEND_ONCE: u32 = 18;
-const MACH_MSG_TYPE_PORT_SEND: u32 = 17;
+pub const MACH_MSG_TYPE_PORT_SEND: u32 = 17;
 pub const MIG_BAD_ID: u32 = (-303i32) as u32;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,9 +30,17 @@ pub enum KObject {
     Task,
     Thread(u32),
     Host,
-    Semaphore { count: i32 },
+    Semaphore {
+        count: i32,
+    },
     Clock,
     IoMaster,
+    /// An I/O Registry entry, by index.
+    IoEntry(usize),
+    IoIterator {
+        items: Vec<usize>,
+        pos: usize,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -85,14 +93,24 @@ impl Ipc {
     }
 }
 
-fn le(b: &[u8], o: usize) -> u32 {
+pub(super) fn le(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
 
 /// Builds a MIG reply as received by the client. A simple reply carries
 /// NDR + return code + `body`; a complex reply carries its port descriptors,
 /// then NDR + `body` only if there is more data.
-fn reply(req: &[u8], body: &[u32], complex_ports: &[(u32, u32)]) -> Vec<u8> {
+/// A complex reply with one out-of-line descriptor, then NDR + `count`.
+/// The 32-bit descriptor layout is address, count, then the flag bytes.
+pub(super) fn ool_reply(req: &[u8], addr: u32, count: u32, flags: u32) -> Vec<u8> {
+    let mut m = reply(req, &[count], &[(0, 0)]);
+    for (o, w) in [(28, addr), (32, count), (36, flags)] {
+        m[o..o + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    m
+}
+
+pub(super) fn reply(req: &[u8], body: &[u32], complex_ports: &[(u32, u32)]) -> Vec<u8> {
     let complex = !complex_ports.is_empty();
     let mut out = Vec::new();
     if complex {
@@ -166,7 +184,7 @@ impl Kernel {
 
     /// vm_allocate/vm_map semantics: VM_FLAGS_ANYWHERE picks a free range;
     /// otherwise the range must be free unless VM_FLAGS_OVERWRITE is set.
-    fn vm_allocate(
+    pub(super) fn vm_allocate(
         &mut self,
         addr: u32,
         size: u32,
@@ -205,6 +223,16 @@ impl Kernel {
         let body = &msg[24 + descs..];
         let arg = |i: usize| le(body, 8 + 4 * i);
         let r = |kr: u32| Some(reply(msg, &[kr], &[]));
+        if matches!(
+            obj,
+            KObject::IoMaster | KObject::IoEntry(_) | KObject::IoIterator { .. }
+        ) {
+            let rep = super::iokit::msg(self, obj.clone(), msg);
+            if rep.is_none() {
+                log!("xnu: unhandled IOKit request {id} to {obj:?}");
+            }
+            return rep;
+        }
         match id {
             // mach_port_allocate(task, right, &name)
             3204 => {
@@ -260,16 +288,12 @@ impl Kernel {
                 let bytes: Vec<u8> = ports.iter().flat_map(|p| p.to_le_bytes()).collect();
                 let addr = self.vm_allocate(0, bytes.len() as u32, 0, 1, "task_threads")?;
                 write_bytes(&mut self.mem, addr, &bytes);
-                let mut m = reply(msg, &[ports.len() as u32], &[(0, 0)]);
                 const MACH_MSG_OOL_PORTS_DESCRIPTOR: u32 = 2;
-                // MACH_MSG_PHYSICAL_COPY. The 32-bit layout is address, count,
-                // then the flag bytes.
-                let flags =
-                    MACH_MSG_OOL_PORTS_DESCRIPTOR << 24 | MACH_MSG_TYPE_PORT_SEND << 16 | 1 << 8;
-                for (o, w) in [(28, addr), (32, ports.len() as u32), (36, flags)] {
-                    m[o..o + 4].copy_from_slice(&w.to_le_bytes());
-                }
-                Some(m)
+                const MACH_MSG_VIRTUAL_COPY: u32 = 1;
+                let flags = MACH_MSG_OOL_PORTS_DESCRIPTOR << 24
+                    | MACH_MSG_TYPE_PORT_SEND << 16
+                    | MACH_MSG_VIRTUAL_COPY << 8;
+                Some(ool_reply(msg, addr, ports.len() as u32, flags))
             }
             // semaphore_create(task, policy, value)
             3418 => {
@@ -377,6 +401,16 @@ impl Kernel {
             3404 => r(5),
             _ => {
                 log!("xnu: unhandled MIG request {id} to {obj:?}");
+                if self.trace {
+                    let text: String = msg[24..]
+                        .iter()
+                        .map(|&b| if b.is_ascii_graphic() { b as char } else { ' ' })
+                        .collect();
+                    echo!(
+                        "xnu:   payload: {}",
+                        text.split_whitespace().collect::<Vec<_>>().join(" ")
+                    );
+                }
                 r(MIG_BAD_ID)
             }
         }

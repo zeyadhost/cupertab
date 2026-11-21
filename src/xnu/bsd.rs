@@ -118,10 +118,14 @@ impl Kernel {
                 log_dbg!("xnu: unknown sysctl {wanted}");
                 return Ret::Err(vfs::ENOENT);
             };
+            let needed = found.len() as u32 * 4;
+            if oldlenp == 0 || oldp == 0 || read_u32(&self.mem, oldlenp) < needed {
+                return Ret::Err(ENOMEM);
+            }
             for (j, v) in found.iter().enumerate() {
                 write_u32(&mut self.mem, oldp + j as u32 * 4, *v);
             }
-            write_u32(&mut self.mem, oldlenp, found.len() as u32 * 4);
+            write_u32(&mut self.mem, oldlenp, needed);
             return ok(0);
         }
         let Some(value) = self.sysctl_value(&oid) else {
@@ -131,8 +135,10 @@ impl Kernel {
         if oldlenp != 0 {
             if oldp != 0 {
                 let cap = read_u32(&self.mem, oldlenp) as usize;
-                let n = value.len().min(cap);
-                write_bytes(&mut self.mem, oldp, &value[..n]);
+                if cap < value.len() {
+                    return Ret::Err(ENOMEM);
+                }
+                write_bytes(&mut self.mem, oldp, &value);
             }
             write_u32(&mut self.mem, oldlenp, value.len() as u32);
         }

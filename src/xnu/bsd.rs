@@ -756,25 +756,30 @@ fn kevent(k: &mut Kernel, args: &[u32; 8]) -> Ret {
             }
         }
         if out.is_empty() {
-            let mut i = 0;
-            while i < kq.user.len() && out.len() < nevents as usize {
-                let e = &mut kq.user[i];
-                if !e.triggered || e.flags & EV_DISABLE != 0 {
-                    i += 1;
+            // Level-triggered events that were delivered go to the back, so
+            // a short event list still reaches every pending event in turn.
+            let mut keep = Vec::new();
+            let mut requeue = Vec::new();
+            for mut e in std::mem::take(&mut kq.user) {
+                if out.len() >= nevents as usize || !e.triggered || e.flags & EV_DISABLE != 0 {
+                    keep.push(e);
                     continue;
                 }
                 let filter_flags = EVFILT_USER as u16 as u32;
                 out.push([e.ident, filter_flags, e.fflags, 0, e.udata]);
+                if e.flags & EV_ONESHOT != 0 {
+                    continue;
+                }
                 if e.flags & EV_CLEAR != 0 {
                     e.fflags = 0;
                     e.triggered = false;
-                }
-                if e.flags & EV_ONESHOT != 0 {
-                    kq.user.remove(i);
+                    keep.push(e);
                 } else {
-                    i += 1;
+                    requeue.push(e);
                 }
             }
+            keep.extend(requeue);
+            kq.user = keep;
         }
     }
     if !out.is_empty() || nevents == 0 {

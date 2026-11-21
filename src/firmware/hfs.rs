@@ -267,6 +267,10 @@ impl<R: ReadAt> Volume<R> {
         Ok(())
     }
 
+    pub fn lookup_id(&self, id: u32) -> Option<&Node> {
+        self.nodes.get(&id)
+    }
+
     pub fn child(&self, dir: u32, name: &str) -> Option<&Node> {
         self.by_name
             .get(&(dir, name.to_string()))

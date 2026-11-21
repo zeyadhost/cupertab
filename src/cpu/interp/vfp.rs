@@ -194,7 +194,7 @@ impl Interp {
                 let low = imm8 & 0x3f;
                 if double {
                     let exp_hi: u64 = if b6 != 0 { 0x3fc } else { 0x400 };
-                    let bits = (sign as u64) << 63 | exp_hi << 52 | (low as u64) << 46;
+                    let bits = (sign as u64) << 63 | exp_hi << 52 | (low as u64) << 48;
                     self.set_d(vd, f64::from_bits(bits));
                 } else {
                     let exp_hi: u32 = if b6 != 0 { 0x1f } else { 0x20 };

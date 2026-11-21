@@ -472,6 +472,9 @@ impl Kernel {
                     "xnu: mach_msg to invalid port {remote:#x} (id {})",
                     le(&data, 20)
                 );
+                if self.trace {
+                    self.backtrace();
+                }
                 return Some(MACH_SEND_INVALID_DEST);
             };
             if let Some(obj) = port.kobject.clone() {
@@ -498,7 +501,7 @@ impl Kernel {
             }
         }
         if option & MACH_RCV_MSG != 0 {
-            if let Some(kr) = self.try_receive(msg, rcv_size, rcv_name) {
+            if let Some(kr) = self.try_receive(msg, option, rcv_size, rcv_name) {
                 return Some(kr);
             }
             if option & MACH_RCV_TIMEOUT != 0 && timeout == 0 {
@@ -515,7 +518,17 @@ impl Kernel {
         Some(KERN_SUCCESS)
     }
 
-    fn try_receive(&mut self, msg: u32, rcv_size: u32, name: u32) -> Option<u32> {
+    fn try_receive(&mut self, msg: u32, option: u32, rcv_size: u32, name: u32) -> Option<u32> {
+        // MACH_RCV_TRAILER_ELEMENTS: the null, seqno, sender (security token)
+        // and audit trailers. launchd's MIG replies are checked for the audit
+        // one. Every sender is the kernel or this one task, so the tokens are
+        // all zero.
+        let trailer_size = match (option >> 24) & 0xf {
+            0 => 8,
+            1 => 12,
+            2 => 20,
+            _ => 52,
+        };
         self.fire_timers();
         let candidates: Vec<u32> = match self.ipc.ports.get(&name) {
             Some(p) if p.is_set => self
@@ -531,11 +544,14 @@ impl Kernel {
         for n in candidates {
             let p = self.ipc.ports.get_mut(&n).unwrap();
             if let Some(m) = p.queue.front() {
-                if m.len() as u32 > rcv_size {
+                if m.len() as u32 + trailer_size > rcv_size {
                     return Some(MACH_RCV_TOO_LARGE);
                 }
                 let m = p.queue.pop_front().unwrap();
                 write_bytes(&mut self.mem, msg, &m);
+                let mut trailer = vec![0u8; trailer_size as usize];
+                trailer[4..8].copy_from_slice(&trailer_size.to_le_bytes());
+                write_bytes(&mut self.mem, msg + m.len() as u32, &trailer);
                 // msgh_local_port of the received message is the port it came
                 // on
                 write_u32(&mut self.mem, msg + 12, n);
@@ -574,24 +590,36 @@ pub fn bootstrap_msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
             } else {
                 port
             };
-            log_dbg!("xnu: bootstrap_check_in({name:?}) = {port:#x}");
+            if k.trace {
+                log!("xnu: bootstrap_check_in({name:?}) = {port:#x}");
+            }
             Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_RECEIVE)]))
         }
         // bootstrap_register(name, service_port)
         403 => {
             let port = le(msg, 28);
-            log_dbg!("xnu: bootstrap_register({name:?}, {port:#x})");
+            if k.trace {
+                log!("xnu: bootstrap_register({name:?}, {port:#x})");
+            }
             k.ipc.services.insert(name, port);
             Some(reply(msg, &[KERN_SUCCESS], &[]))
         }
         // bootstrap_look_up
         404 => match k.ipc.services.get(&name) {
-            Some(&port) => Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_SEND)])),
+            Some(&port) => {
+                if k.trace {
+                    log!("xnu: bootstrap_look_up({name:?}) = {port:#x}");
+                }
+                Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_SEND)]))
+            }
             None => {
                 log!("xnu: bootstrap_look_up({name:?}): no such service");
                 Some(reply(msg, &[BOOTSTRAP_UNKNOWN_SERVICE], &[]))
             }
         },
+        // vproc_mig_swap_integer(inkey, outkey, inval): job tunables such as
+        // the Jetsam priority. Nothing is stored; every key reads as 0.
+        416 => Some(reply(msg, &[KERN_SUCCESS, 0, 0], &[])),
         _ => {
             log!("xnu: unhandled bootstrap request {id}");
             Some(reply(msg, &[MIG_BAD_ID], &[]))
@@ -709,8 +737,8 @@ pub fn trap(k: &mut Kernel, num: u32) -> Option<u32> {
 pub fn retry_blocked(k: &mut Kernel, block: &Block) -> bool {
     match *block {
         Block::MachReceive { name, .. } => {
-            let (msg, rcv_size) = (k.arg(0), k.arg(3));
-            match k.try_receive(msg, rcv_size, name) {
+            let (msg, option, rcv_size) = (k.arg(0), k.arg(1), k.arg(3));
+            match k.try_receive(msg, option, rcv_size, name) {
                 Some(kr) => {
                     k.cpu.regs_mut()[0] = kr;
                     true

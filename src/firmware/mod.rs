@@ -87,8 +87,8 @@ const ROOTFS_KEYS: &[(&str, &str, &str)] = &[
 ];
 
 fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
-        return Err("Hex key has odd length".to_string());
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Key must be an even number of hex digits".to_string());
     }
     (0..s.len())
         .step_by(2)

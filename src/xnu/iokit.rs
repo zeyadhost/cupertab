@@ -86,6 +86,12 @@ impl Registry {
         r.add(Some(root), "clcd", clcd, vec![("name", strings(&["clcd"]))]);
         r.add(
             Some(root),
+            "IOPMrootDomain",
+            "IOPMrootDomain",
+            vec![("name", strings(&["IOPMrootDomain"]))],
+        );
+        r.add(
+            Some(root),
             "chosen",
             "IOService",
             vec![("name", strings(&["chosen"]))],
@@ -117,7 +123,13 @@ impl Registry {
     /// Looks up a path like `IODeviceTree:/chosen`. Every plane shares the
     /// one tree.
     pub fn lookup_path(&self, path: &str) -> Option<usize> {
-        let (_plane, rest) = path.split_once(':')?;
+        let (plane, rest) = path.split_once(':')?;
+        // Only the device tree plane is modelled as a hierarchy. In the other
+        // planes, find a service by its own name, the path's last component.
+        if plane != "IODeviceTree" {
+            let last = rest.rsplit('/').find(|c| !c.is_empty())?;
+            return self.entries.iter().position(|e| e.name == last);
+        }
         let mut cur = 0;
         for comp in rest.split('/').filter(|c| !c.is_empty()) {
             cur = *self.entries[cur]
@@ -246,7 +258,10 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             let (path, _) = in_string(msg, ARGS);
             match k.iokit.lookup_path(&path) {
                 Some(e) => port_reply(k.ipc.new_kernel_port(KObject::IoEntry(e))),
-                None => err(KIO_RETURN_NOT_FOUND),
+                None => {
+                    log!("xnu: no I/O Registry entry at {path:?}");
+                    err(KIO_RETURN_NOT_FOUND)
+                }
             }
         }
         // io_service_open_extended(service, owning_task, connect_type, ndr,
@@ -311,6 +326,26 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
         }
         // io_connect_set_notification_port(connection, type, port, reference)
         (2818, KObject::IoConnect(_)) => err(KERN_SUCCESS),
+        // io_service_add_notification(master, notification_type, matching,
+        // wake_port, reference): a complex request, so the strings follow the
+        // port descriptor and NDR. Services never appear or go away, so the
+        // iterator holds the current matches and the wake port is never
+        // sent to.
+        (2849, KObject::IoMaster) => {
+            let (_kind, next) = in_string(msg, 48);
+            let (dict, _) = in_string(msg, next);
+            let items = k.iokit.matching(&dict);
+            port_reply(k.ipc.new_kernel_port(KObject::IoIterator { items, pos: 0 }))
+        }
+        // io_service_add_interest_notification(service, type_of_interest,
+        // wake_port, reference): complex, like 2849. Nothing ever changes
+        // state, so the returned notification object never fires.
+        (2850, KObject::IoEntry(_)) => port_reply(k.ipc.new_kernel_port(KObject::IoIterator {
+            items: Vec::new(),
+            pos: 0,
+        })),
+        // io_service_close(connection)
+        (2816, KObject::IoConnect(_)) => err(KERN_SUCCESS),
         // io_registry_get_root_entry(master)
         (2827, KObject::IoMaster) => port_reply(k.ipc.new_kernel_port(KObject::IoEntry(0))),
         // io_iterator_next(iterator)

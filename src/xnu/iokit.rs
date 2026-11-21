@@ -46,6 +46,8 @@ pub struct Registry {
     pub surfaces: Vec<Surface>,
     /// MBX2D's command buffer, allocated on first use.
     pub mbx_command_buffer: u32,
+    /// The page holding MBX2D's per-surface status words.
+    pub mbx_status_page: u32,
     /// Async notification ports set on user clients, by connection port.
     pub notify_ports: std::collections::HashMap<u32, u32>,
     /// Enabled framebuffer vsync callbacks, by connection port.
@@ -111,6 +113,7 @@ impl Registry {
             entries: Vec::new(),
             surfaces: Vec::new(),
             mbx_command_buffer: 0,
+            mbx_status_page: 0,
             notify_ports: Default::default(),
             vsyncs: Default::default(),
         };
@@ -684,7 +687,14 @@ fn mbx_method(k: &mut Kernel, selector: u32, scalars: &[u64]) -> Option<(Vec<u64
         (2, [id, _]) => {
             let id = u32::try_from(*id).ok().filter(|&id| id != 0)?;
             let addr = k.iokit.surfaces.get(id as usize - 1)?.addr;
-            let status = k.vm_allocate(0, 0x1000, 0, 1, "MBX surface")?;
+            // One page holds every surface's status word.
+            if id >= 0x1000 / 4 {
+                return None;
+            }
+            if k.iokit.mbx_status_page == 0 {
+                k.iokit.mbx_status_page = k.vm_allocate(0, 0x1000, 0, 1, "MBX surfaces")?;
+            }
+            let status = k.iokit.mbx_status_page + 4 * id;
             let words = [id, addr, 0, status, 0];
             (
                 Vec::new(),

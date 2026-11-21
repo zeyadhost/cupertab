@@ -42,6 +42,9 @@ const CACHE_RUNS: usize = 8;
 
 impl<R: ReadAt> UdifImage<R> {
     pub fn new(inner: R, len: u64) -> Result<Self, String> {
+        if len < 512 {
+            return Err("Not a UDIF image (too short)".to_string());
+        }
         let mut koly = [0u8; 512];
         inner
             .read_exact_at(&mut koly, len - 512)
@@ -52,6 +55,9 @@ impl<R: ReadAt> UdifImage<R> {
         let data_fork_offset = be64(&koly[0x18..]);
         let xml_offset = be64(&koly[0xd8..]);
         let xml_length = be64(&koly[0xe0..]);
+        if xml_length > 64 << 20 || xml_offset.saturating_add(xml_length) > len {
+            return Err("Bad UDIF plist location".to_string());
+        }
         let mut xml = vec![0u8; xml_length as usize];
         inner
             .read_exact_at(&mut xml, xml_offset)
@@ -84,11 +90,17 @@ impl<R: ReadAt> UdifImage<R> {
             let first_sector = be64(&mish[8..]);
             let data_offset = be64(&mish[24..]);
             let count = be32(&mish[0xc8..]) as usize;
+            if mish.len() < 0xcc + count * 40 {
+                return Err("bad mish block".to_string());
+            }
             for i in 0..count {
                 let c = &mish[0xcc + i * 40..0xcc + (i + 1) * 40];
                 let kind = be32(c);
                 if kind == 0xffffffff || kind == 0x7ffffffe {
                     continue;
+                }
+                if be64(&c[16..]) > 1 << 24 {
+                    return Err("UDIF run too large".to_string());
                 }
                 runs.push(Run {
                     kind,

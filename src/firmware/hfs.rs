@@ -224,18 +224,34 @@ impl<R: ReadAt> Volume<R> {
         self.read_fork(fork, &mut header, 0)
             .map_err(|e| e.to_string())?;
         let node_size = be16(&header[14 + 18..]) as u64;
+        let total_nodes = be32(&header[14 + 22..]);
         let mut node_idx = be32(&header[14 + 10..]);
+        if node_size < 512 {
+            return Err("Bad B-tree node size".to_string());
+        }
+        let bad = || "Corrupt B-tree node".to_string();
         let mut node = vec![0u8; node_size as usize];
+        let mut visited = 0;
         while node_idx != 0 {
+            visited += 1;
+            if visited > total_nodes || node_idx >= total_nodes {
+                return Err(bad());
+            }
             self.read_fork(fork, &mut node, node_idx as u64 * node_size)
                 .map_err(|e| e.to_string())?;
             let num_records = be16(&node[10..]) as usize;
+            if 14 + 2 * (num_records + 1) > node.len() {
+                return Err(bad());
+            }
             for i in 0..num_records {
                 let off_pos = node_size as usize - 2 * (i + 1);
                 let start = be16(&node[off_pos..]) as usize;
                 let end = be16(&node[off_pos - 2..]) as usize;
-                let key_len = be16(&node[start..]) as usize + 2;
+                let key_len = be16(node.get(start..).ok_or_else(bad)?) as usize + 2;
                 let key_end = start + key_len + (key_len & 1);
+                if start < 14 || key_end > end || end > off_pos - 2 {
+                    return Err(bad());
+                }
                 f(&node[start..start + key_len], &node[key_end..end]);
             }
             node_idx = be32(&node[0..]);

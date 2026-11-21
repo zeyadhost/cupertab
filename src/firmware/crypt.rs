@@ -45,11 +45,15 @@ impl<R: ReadAt> EncryptedImage<R> {
         if &header[0..8] != b"encrcdsa" || be32(&header[8..]) != 2 {
             return Err("Not an encrcdsa v2 image".to_string());
         }
+        let chunk_size = be32(&header[0x34..]) as u64;
+        if chunk_size == 0 || chunk_size % 16 != 0 || chunk_size > 1 << 20 {
+            return Err(format!("Bad encrcdsa chunk size {chunk_size}"));
+        }
         Ok(EncryptedImage {
             inner,
             aes_key: key[0..16].try_into().unwrap(),
             hmac_key: key[16..36].try_into().unwrap(),
-            chunk_size: be32(&header[0x34..]) as u64,
+            chunk_size,
             data_size: be64(&header[0x38..]),
             data_offset: be64(&header[0x40..]),
             cache: RefCell::new(None),

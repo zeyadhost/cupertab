@@ -42,6 +42,51 @@ impl Entry {
 
 pub struct Registry {
     pub entries: Vec<Entry>,
+    /// Surfaces made through `IOCoreSurfaceRoot`, by ID minus one.
+    pub surfaces: Vec<Surface>,
+    /// Async notification ports set on user clients, by connection port.
+    pub notify_ports: std::collections::HashMap<u32, u32>,
+    /// Enabled framebuffer vsync callbacks, by connection port.
+    pub vsyncs: std::collections::HashMap<u32, VSync>,
+}
+
+/// A framebuffer vsync callback, sent at 60 Hz as an async completion.
+pub struct VSync {
+    pub port: u32,
+    pub callback: u32,
+    pub refcon: u32,
+    /// The absolute time of the next vsync.
+    pub next: u64,
+}
+
+impl VSync {
+    /// 24 MHz ticks per 60 Hz frame.
+    pub const PERIOD: u64 = 400_000;
+
+    /// The completion message IOKitLib dispatches to `callback(refcon,
+    /// result, args, 6)`; the first two arguments are the time stamp.
+    pub fn message(&self, time: u64) -> Vec<u8> {
+        const OS_NOTIFICATION_MESSAGE_ID: u32 = 53;
+        const ASYNC_COMPLETION_TYPE: u32 = 150;
+        let mut words = vec![0, 92, self.port, 0, 0, OS_NOTIFICATION_MESSAGE_ID];
+        words.extend([4 + 6 * 4, ASYNC_COMPLETION_TYPE]);
+        words.extend([self.port, self.callback, self.refcon, 0, 0, 0, 0, 0]);
+        words.extend([0, time as u32, (time >> 32) as u32, 0, 0, 0, 0]);
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+}
+
+/// An IOSurface: pixels in guest memory, shared by every client.
+pub struct Surface {
+    pub addr: u32,
+    pub alloc_size: u32,
+    pub width: u32,
+    pub height: u32,
+    pub bytes_per_row: u32,
+    pub bytes_per_element: u32,
+    pub pixel_format: u32,
+    /// A small block whose word at offset 8 is the surface's seed.
+    pub seed_block: u32,
 }
 
 /// A device tree property: NUL-terminated strings back to back.
@@ -60,6 +105,9 @@ impl Registry {
         let target = board.strip_suffix("AP").unwrap_or(&board).to_string();
         let mut r = Registry {
             entries: Vec::new(),
+            surfaces: Vec::new(),
+            notify_ports: Default::default(),
+            vsyncs: Default::default(),
         };
         let root = r.add(
             None,
@@ -89,6 +137,18 @@ impl Registry {
             "IOPMrootDomain",
             "IOPMrootDomain",
             vec![("name", strings(&["IOPMrootDomain"]))],
+        );
+        r.add(
+            Some(root),
+            "mbx",
+            "AppleMBXDevice",
+            vec![("name", strings(&["mbx"]))],
+        );
+        r.add(
+            Some(root),
+            "IOCoreSurfaceRoot",
+            "IOCoreSurfaceRoot",
+            vec![("name", strings(&["IOCoreSurfaceRoot"]))],
         );
         r.add(
             Some(root),
@@ -306,7 +366,9 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             let inband_out_max = le(msg, tail + 12) as usize;
             let class = k.iokit.entries[e].class.clone();
             let result = if class.ends_with("CLCD") {
-                framebuffer_method(k, selector, &scalars, inband)
+                framebuffer_method(k, le(msg, 8), selector, &scalars, inband)
+            } else if class == "IOCoreSurfaceRoot" {
+                surface_method(k, selector, &scalars, inband)
             } else {
                 None
             };
@@ -327,7 +389,13 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             Some(reply(msg, &body, &[]))
         }
         // io_connect_set_notification_port(connection, type, port, reference)
-        (2818, KObject::IoConnect(_)) => err(KERN_SUCCESS),
+        // A complex request: the port descriptor comes first.
+        (2818, KObject::IoConnect(_)) => {
+            if le(msg, 0) & 0x80000000 != 0 && msg.len() >= 32 {
+                k.iokit.notify_ports.insert(le(msg, 8), le(msg, 28));
+            }
+            err(KERN_SUCCESS)
+        }
         // io_service_add_notification(master, notification_type, matching,
         // wake_port, reference): a complex request, so the strings follow the
         // port descriptor and NDR. Services never appear or go away, so a
@@ -351,7 +419,11 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             pos: 0,
         })),
         // io_service_close(connection)
-        (2816, KObject::IoConnect(_)) => err(KERN_SUCCESS),
+        (2816, KObject::IoConnect(_)) => {
+            k.iokit.notify_ports.remove(&le(msg, 8));
+            k.iokit.vsyncs.remove(&le(msg, 8));
+            err(KERN_SUCCESS)
+        }
         // io_registry_get_root_entry(master)
         (2827, KObject::IoMaster) => port_reply(k.ipc.new_kernel_port(KObject::IoEntry(0))),
         // io_iterator_next(iterator)
@@ -476,8 +548,9 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
 /// device's size. Returns scalar and struct outputs.
 fn framebuffer_method(
     k: &mut Kernel,
+    connection: u32,
     selector: u32,
-    _scalars: &[u64],
+    scalars: &[u64],
     _inband: &[u8],
 ) -> Option<(Vec<u64>, Vec<u8>)> {
     let (w, h) = display_size(&k.fw.info.product_type);
@@ -495,6 +568,126 @@ fn framebuffer_method(
             (Vec::new(), t)
         }
         3 | 4 | 5 | 7 | 12 | 15 | 17 | 19 | 22 | 33 => (vec![0], Vec::new()),
+        // Enable vsync notifications with (callback, refcon), or disable
+        // them with a null callback.
+        9 => {
+            let callback = *scalars.first()? as u32;
+            let refcon = scalars.get(1).map_or(0, |&v| v as u32);
+            match k.iokit.notify_ports.get(&connection) {
+                Some(&port) if callback != 0 => {
+                    let next = k.absolute_time() + VSync::PERIOD;
+                    let v = VSync {
+                        port,
+                        callback,
+                        refcon,
+                        next,
+                    };
+                    k.iokit.vsyncs.insert(connection, v);
+                }
+                _ => {
+                    k.iokit.vsyncs.remove(&connection);
+                }
+            }
+            (Vec::new(), Vec::new())
+        }
+        _ => return None,
+    })
+}
+
+/// An integer in a property dictionary serialized by `IOCFSerialize`.
+fn dict_int(dict: &str, key: &str) -> Option<u32> {
+    let k = format!("<key>{key}</key>");
+    let rest = dict[dict.find(&k)? + k.len()..].trim_start();
+    let rest = rest.strip_prefix("<integer")?;
+    let rest = &rest[rest.find('>')? + 1..];
+    let v = rest[..rest.find('<')?].trim();
+    match v.strip_prefix("0x") {
+        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+        None => v.parse::<i64>().ok().map(|v| v as u32),
+    }
+}
+
+/// The 0x4bc-byte description IOSurface.framework keeps for a surface.
+fn surface_info(id: u32, s: &Surface) -> Vec<u8> {
+    let mut out = vec![0u8; 0x4bc];
+    let mut put = |o: usize, v: u32| out[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    put(0x00, s.addr);
+    put(0x04, id);
+    put(0x08, s.alloc_size);
+    put(0x0c, s.width);
+    put(0x10, s.height);
+    put(0x14, s.bytes_per_row);
+    put(0x1c, s.pixel_format);
+    put(0x34, s.seed_block);
+    out[0x2c..0x2e].copy_from_slice(&(s.bytes_per_element as u16).to_le_bytes());
+    out[0x2e] = 1;
+    out[0x2f] = 1;
+    out
+}
+
+/// `IOCoreSurfaceRoot` user client methods, as IOSurface.framework calls
+/// them.
+fn surface_method(
+    k: &mut Kernel,
+    selector: u32,
+    scalars: &[u64],
+    inband: &[u8],
+) -> Option<(Vec<u64>, Vec<u8>)> {
+    let surface_id = || {
+        scalars
+            .first()
+            .map(|&v| v as u32)
+            .or_else(|| inband.get(..4).map(|b| le(b, 0)))
+    };
+    Some(match selector {
+        // Create, from the serialized property dictionary.
+        0 => {
+            let dict = String::from_utf8_lossy(inband);
+            let width = dict_int(&dict, "IOSurfaceWidth")?;
+            let height = dict_int(&dict, "IOSurfaceHeight")?;
+            let bytes_per_element = dict_int(&dict, "IOSurfaceBytesPerElement").unwrap_or(4);
+            let bytes_per_row = dict_int(&dict, "IOSurfaceBytesPerRow")
+                .unwrap_or(width * bytes_per_element)
+                .next_multiple_of(16);
+            let alloc_size = dict_int(&dict, "IOSurfaceAllocSize")
+                .unwrap_or(0)
+                .max(bytes_per_row.checked_mul(height)?);
+            let pixel_format = dict_int(&dict, "IOSurfacePixelFormat").unwrap_or(0);
+            let pages = alloc_size.checked_add(0xfff)? & !0xfff;
+            let addr = k.vm_allocate(0, pages + 0x1000, 0, 1, "IOSurface")?;
+            let surface = Surface {
+                addr,
+                alloc_size,
+                width,
+                height,
+                bytes_per_row,
+                bytes_per_element,
+                pixel_format,
+                seed_block: addr + pages,
+            };
+            let id = k.iokit.surfaces.len() as u32 + 1;
+            log_dbg!("xnu: IOSurface {id}: {width}x{height}, {bytes_per_row} bytes/row");
+            let info = surface_info(id, &surface);
+            k.iokit.surfaces.push(surface);
+            (Vec::new(), info)
+        }
+        // Limits: row alignment, then the largest width, height, row and
+        // allocation.
+        16 => {
+            let limits = [1u32, 16, 4096, 4096 * 4, 64 << 20];
+            (
+                Vec::new(),
+                limits.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            )
+        }
+        // Release, lock and unlock: the memory stays mapped and coherent.
+        1..=3 => (Vec::new(), Vec::new()),
+        // Look up by ID.
+        6 => {
+            let id = surface_id()?;
+            let s = k.iokit.surfaces.get((id as usize).checked_sub(1)?)?;
+            (Vec::new(), surface_info(id, s))
+        }
         _ => return None,
     })
 }

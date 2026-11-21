@@ -402,8 +402,8 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         })),
         363 => kevent(k, &args),
         // select(nfds, readfds, writefds, errorfds, timeout): never blocks.
-        // A socket is readable once its service has replied; other
-        // descriptors are always ready.
+        // A socket is readable once its service has replied and a kqueue
+        // once an event fired; other descriptors are always ready.
         93 | 407 => {
             let mut ready = 0;
             for (set, reading) in [(args[1], true), (args[2], false), (args[3], false)] {
@@ -424,6 +424,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                         let is_ready = set != args[3]
                             && match k.vfs.fds.get(&fd).map(|f| &f.kind) {
                                 Some(FileKind::Socket(s)) => !reading || s.readable(),
+                                Some(FileKind::Kqueue(kq)) => !reading || kq.borrow().pending(),
                                 Some(_) => true,
                                 None => return Ret::Err(vfs::EBADF),
                             };

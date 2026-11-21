@@ -44,6 +44,16 @@ pub struct Kqueue {
     pub user: Vec<UserEvent>,
 }
 
+impl Kqueue {
+    /// Whether `kevent` would return an event without waiting.
+    pub fn pending(&self) -> bool {
+        const EV_DISABLE: u16 = 0x0008;
+        self.user
+            .iter()
+            .any(|e| e.triggered && e.flags & EV_DISABLE == 0)
+    }
+}
+
 pub struct UserEvent {
     pub ident: u32,
     pub udata: u32,

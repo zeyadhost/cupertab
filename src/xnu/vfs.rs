@@ -12,6 +12,7 @@ use crate::firmware::Firmware;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 pub const ENOENT: u32 = 2;
 pub const EBADF: u32 = 9;
@@ -108,6 +109,45 @@ pub struct OpenFile {
     pub flags: u32,
 }
 
+#[cfg(any(target_os = "emscripten", test))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MappingKey {
+    node: u32,
+    offset: u64,
+    len: u32,
+}
+
+/// Pristine firmware bytes reused across processes, not shared guest memory.
+#[cfg(any(target_os = "emscripten", test))]
+#[derive(Default)]
+struct MappingCache {
+    entries: std::collections::VecDeque<(MappingKey, Rc<Vec<u8>>)>,
+}
+
+#[cfg(any(target_os = "emscripten", test))]
+impl MappingCache {
+    const BUDGET: usize = 48 * 1024 * 1024;
+
+    fn get(&mut self, key: MappingKey) -> Option<Rc<Vec<u8>>> {
+        let i = self.entries.iter().position(|(k, _)| *k == key)?;
+        let entry = self.entries.remove(i).unwrap();
+        let bytes = Rc::clone(&entry.1);
+        self.entries.push_back(entry);
+        Some(bytes)
+    }
+
+    fn insert(&mut self, key: MappingKey, bytes: Rc<Vec<u8>>) {
+        if bytes.capacity() > Self::BUDGET {
+            return;
+        }
+        let mut used: usize = self.entries.iter().map(|(_, data)| data.capacity()).sum();
+        while used + bytes.capacity() > Self::BUDGET {
+            used -= self.entries.pop_front().unwrap().1.capacity();
+        }
+        self.entries.push_back((key, bytes));
+    }
+}
+
 pub struct Vfs {
     overlay: PathBuf,
     pub fds: HashMap<u32, OpenFile>,
@@ -117,6 +157,8 @@ pub struct Vfs {
     /// Shared memory objects by `shm_open` name.
     pub shm: HashMap<String, std::rc::Rc<std::cell::RefCell<Shm>>>,
     pub shm_maps: Vec<ShmMap>,
+    #[cfg(target_os = "emscripten")]
+    mapping_cache: MappingCache,
 }
 
 pub enum Resolved<'a> {
@@ -170,6 +212,8 @@ impl Vfs {
             deleted: Default::default(),
             shm: HashMap::new(),
             shm_maps: Vec::new(),
+            #[cfg(target_os = "emscripten")]
+            mapping_cache: MappingCache::default(),
         }
     }
 
@@ -448,6 +492,40 @@ impl Vfs {
         entries
     }
 
+    pub fn read_mapping(
+        &mut self,
+        fw: &Firmware,
+        fd: u32,
+        len: u32,
+        offset: u64,
+    ) -> Result<Rc<Vec<u8>>, u32> {
+        #[cfg(target_os = "emscripten")]
+        let key = match &self.fds.get(&fd).ok_or(EBADF)?.kind {
+            // Admit large reads without letting one file fill the whole cache.
+            FileKind::Firmware { node } if (256 * 1024..=32 * 1024 * 1024).contains(&len) => {
+                Some(MappingKey {
+                    node: *node,
+                    offset,
+                    len,
+                })
+            }
+            _ => None,
+        };
+        #[cfg(target_os = "emscripten")]
+        if let Some(bytes) = key.and_then(|key| self.mapping_cache.get(key)) {
+            return Ok(bytes);
+        }
+        let mut data = vec![0; len as usize];
+        let n = self.read(fw, fd, &mut data, Some(offset))?;
+        data.truncate(n);
+        let data = Rc::new(data);
+        #[cfg(target_os = "emscripten")]
+        if let Some(key) = key {
+            self.mapping_cache.insert(key, Rc::clone(&data));
+        }
+        Ok(data)
+    }
+
     pub fn read(
         &mut self,
         fw: &Firmware,
@@ -612,5 +690,31 @@ impl Vfs {
                 .map_err(|_| EINVAL),
             _ => Err(EINVAL),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MappingCache, MappingKey, Rc};
+
+    #[test]
+    fn firmware_mapping_cache_matches_ranges_and_evicts_least_recently_used() {
+        let mut cache = MappingCache::default();
+        let key = |offset| MappingKey {
+            node: 1,
+            offset,
+            len: 1024,
+        };
+        let entry = || Rc::new(Vec::with_capacity(MappingCache::BUDGET / 3 + 1));
+        let first = entry();
+        cache.insert(key(0), Rc::clone(&first));
+        cache.insert(key(1024), entry());
+        assert!(cache.get(MappingKey { len: 512, ..key(0) }).is_none());
+        assert!(cache.get(MappingKey { node: 2, ..key(0) }).is_none());
+        assert!(Rc::ptr_eq(&cache.get(key(0)).unwrap(), &first));
+        cache.insert(key(2048), entry());
+        assert!(cache.get(key(1024)).is_none());
+        assert!(cache.get(key(0)).is_some());
+        assert!(cache.get(key(2048)).is_some());
     }
 }

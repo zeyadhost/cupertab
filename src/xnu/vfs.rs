@@ -288,7 +288,7 @@ impl Vfs {
         } else if m.file_type().is_symlink() {
             0o120755
         } else {
-            0o100644
+            Self::host_file_mode(&m)
         };
         let mtime = m
             .modified()
@@ -304,6 +304,19 @@ impl Vfs {
             mtime,
             nlink: 1,
         })
+    }
+
+    /// A host file's permission bits, so an installed app's executable
+    /// stays executable.
+    #[cfg(unix)]
+    fn host_file_mode(m: &std::fs::Metadata) -> u16 {
+        use std::os::unix::fs::PermissionsExt;
+        0o100000 | (m.permissions().mode() & 0o777) as u16
+    }
+
+    #[cfg(not(unix))]
+    fn host_file_mode(_: &std::fs::Metadata) -> u16 {
+        0o100644
     }
 
     fn device(path: &str) -> Option<u8> {

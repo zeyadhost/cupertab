@@ -182,7 +182,7 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
         .map(str::to_string)
         .ok_or("no Payload/*.app in the IPA")?;
 
-    let id = zip
+    let info = zip
         .by_name(&format!("Payload/{app}/Info.plist"))
         .ok()
         .and_then(|mut f| {
@@ -190,13 +190,11 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
             f.read_to_end(&mut data).ok()?;
             plist::Value::from_reader(std::io::Cursor::new(data)).ok()
         })
-        .and_then(|v| {
-            v.as_dictionary()?
-                .get("CFBundleIdentifier")?
-                .as_string()
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| app.clone());
+        .and_then(Value::into_dictionary)
+        .unwrap_or_default();
+    let string = |key: &str| info.get(key).and_then(Value::as_string).map(str::to_string);
+    let id = string("CFBundleIdentifier").unwrap_or_else(|| app.clone());
+    let executable = Path::new(&app).join(string("CFBundleExecutable").unwrap_or_default());
 
     // A stable container name per bundle identifier, so reinstalling an app
     // keeps its documents and different apps never share one.
@@ -246,7 +244,7 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
             {
                 return Err(format!("bad path in the IPA: {}", rel.display()));
             }
-            let out = staging.join(rel);
+            let out = staging.join(&rel);
             if entry.is_dir() {
                 std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
                 continue;
@@ -257,6 +255,14 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
             let mut data = Vec::new();
             entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
             std::fs::write(&out, data).map_err(|e| e.to_string())?;
+            // IPAs made on some hosts lose their modes, so the bundle's
+            // executable is always made executable.
+            #[cfg(unix)]
+            if entry.unix_mode().is_some_and(|m| m & 0o111 != 0) || rel == executable {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755))
+                    .map_err(|e| e.to_string())?;
+            }
         }
         Ok(())
     })();

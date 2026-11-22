@@ -10,7 +10,7 @@
 //! for example SpringBoard finds its `N82AP.plist` from `IODeviceTree:/`.
 
 use super::mach::{le, ool_reply, reply, KObject, KERN_SUCCESS, MACH_MSG_TYPE_PORT_SEND};
-use super::{read_u32, write_bytes, write_u32, Kernel};
+use super::{read_bytes, read_u32, write_bytes, write_u32, Kernel};
 use crate::firmware::IpswInfo;
 
 const KIO_RETURN_NOT_FOUND: u32 = 0xe00002f0;
@@ -724,7 +724,51 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
             let corner = |v: u32| (v >> 16, v & 0xffff);
             mbx_fill(k, w[4], w[12], corner(w[13]), corner(w[14]));
         }
+        // Copy, raster op 0xCC: source and destination surface IDs, the
+        // source origin (x in bits 14-23, y below) and destination corners.
+        if w.len() >= 18 && w[0] == 5 && w[14] & 0xff == 0xcc {
+            let corner = |v: u32| (v >> 16, v & 0xffff);
+            let src_origin = ((w[10] >> 14) & 0x3ff, w[10] & 0x3fff);
+            mbx_copy(k, w[4], w[5], src_origin, corner(w[16]), corner(w[17]));
+        }
         at += 4 + n;
+    }
+}
+
+fn mbx_copy(
+    k: &mut Kernel,
+    src_id: u32,
+    dst_id: u32,
+    (sx, sy): (u32, u32),
+    (x0, y0): (u32, u32),
+    (x1, y1): (u32, u32),
+) {
+    let surface = |id: u32| {
+        id.checked_sub(1)
+            .and_then(|i| k.iokit.surfaces.get(i as usize))
+            .filter(|s| s.bytes_per_element == 4)
+            .map(|s| (s.addr, s.bytes_per_row, s.width, s.height))
+    };
+    let (Some(src), Some(dst)) = (surface(src_id), surface(dst_id)) else {
+        return;
+    };
+    let x1 = x1.min(dst.2).min((x0 + src.2).saturating_sub(sx));
+    let y1 = y1.min(dst.3).min((y0 + src.3).saturating_sub(sy));
+    if x0 >= x1 {
+        return;
+    }
+    // Read the whole rectangle first, as it may overlap within one surface.
+    let rows: Vec<Vec<u8>> = (y0..y1)
+        .map(|y| {
+            read_bytes(
+                &k.mem,
+                src.0 + (sy + y - y0) * src.1 + sx * 4,
+                (x1 - x0) * 4,
+            )
+        })
+        .collect();
+    for (y, row) in (y0..y1).zip(rows) {
+        write_bytes(&mut k.mem, dst.0 + y * dst.1 + x0 * 4, &row);
     }
 }
 
@@ -809,6 +853,54 @@ fn surface_method(
             let id = surface_id()?;
             let s = k.iokit.surfaces.get((id as usize).checked_sub(1)?)?;
             (Vec::new(), surface_info(id, s))
+        }
+        // Wrap client memory (IOSurfaceClientWrapClientImage): width,
+        // height, pixel format, bytes per element, bytes per row, size and
+        // address. Core Animation wraps every image it composites, often the
+        // same one again, so an identical wrap reuses its surface.
+        8 if inband.len() >= 28 => {
+            let w: Vec<u32> = inband.chunks(4).take(7).map(|c| le(c, 0)).collect();
+            let [width, height, pixel_format, bytes_per_element, bytes_per_row, alloc_size, addr] =
+                w[..]
+            else {
+                return None;
+            };
+            // The last row may stop at the image's edge.
+            let row = width.checked_mul(bytes_per_element)?;
+            if height == 0
+                || row > bytes_per_row
+                || bytes_per_row.checked_mul(height - 1)?.checked_add(row)? > alloc_size
+            {
+                return None;
+            }
+            let existing = k.iokit.surfaces.iter().position(|s| {
+                (
+                    s.addr,
+                    s.width,
+                    s.height,
+                    s.bytes_per_row,
+                    s.bytes_per_element,
+                ) == (addr, width, height, bytes_per_row, bytes_per_element)
+            });
+            let index = match existing {
+                Some(i) => i,
+                None => {
+                    let seed_block = k.vm_allocate(0, 0x1000, 0, 1, "IOSurface seed")?;
+                    k.iokit.surfaces.push(Surface {
+                        addr,
+                        alloc_size,
+                        width,
+                        height,
+                        bytes_per_row,
+                        bytes_per_element,
+                        pixel_format,
+                        seed_block,
+                    });
+                    k.iokit.surfaces.len() - 1
+                }
+            };
+            let id = index as u32 + 1;
+            (Vec::new(), surface_info(id, &k.iokit.surfaces[index]))
         }
         _ => return None,
     })

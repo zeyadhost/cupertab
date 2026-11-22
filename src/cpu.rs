@@ -7,7 +7,7 @@
 //!
 //! Implemented using the C++ library dynarmic, which is a dynamic recompiler,
 //! or, when the `dynarmic` feature is disabled (e.g. on WebAssembly), with a
-//! portable interpreter.
+//! portable interpreter and, on the web, a hot-block Wasm JIT.
 //!
 //! iPhone OS apps used either ARMv6 or ARMv7-A, which are both 32-bit ISAs.
 //! For the moment, only ARMv6 has been tested.
@@ -359,8 +359,13 @@ impl Cpu {
             touchHLE_DynarmicWrapper_invalidate_cache_range(self.dynarmic_wrapper, base, size)
         }
     }
-    #[cfg(not(feature = "dynarmic"))]
+    #[cfg(all(not(feature = "dynarmic"), not(target_os = "emscripten")))]
     pub fn invalidate_cache_range(&mut self, _base: VAddr, _size: GuestUSize) {}
+
+    #[cfg(all(not(feature = "dynarmic"), target_os = "emscripten"))]
+    pub fn invalidate_cache_range(&mut self, base: VAddr, size: GuestUSize) {
+        self.interp.invalidate_cache_range(base, size);
+    }
 
     #[cfg(feature = "dynarmic")]
     /// Start CPU execution.

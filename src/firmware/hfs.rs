@@ -124,7 +124,7 @@ impl<R: ReadAt> Volume<R> {
         };
         let extents_file = parse_fork(&vh[0xc0..]);
         let mut catalog_file = parse_fork(&vh[0x110..]);
-        let attributes_file = parse_fork(&vh[0x160..]);
+        let mut attributes_file = parse_fork(&vh[0x160..]);
 
         let mut overflow: HashMap<u32, Vec<(u32, Vec<Extent>)>> = HashMap::new();
         let mut rsrc_overflow: HashMap<u32, Vec<(u32, Vec<Extent>)>> = HashMap::new();
@@ -151,6 +151,14 @@ impl<R: ReadAt> Volume<R> {
             records.sort_by_key(|(start, _)| *start);
             for (_, extents) in records.iter() {
                 catalog_file.extents.extend(extents);
+            }
+        }
+
+        const ATTRIBUTES_FILE_ID: u32 = 8;
+        if let Some(records) = overflow.get_mut(&ATTRIBUTES_FILE_ID) {
+            records.sort_by_key(|(start, _)| *start);
+            for (_, extents) in records.iter() {
+                attributes_file.extents.extend(extents);
             }
         }
 

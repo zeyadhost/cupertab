@@ -811,6 +811,16 @@ impl Kernel {
                 CpuState::Error(e) => {
                     self.cpu.dump_regs();
                     self.backtrace();
+                    // A crashing app dies on its own, as on the device; only a
+                    // fault in SpringBoard ends the run.
+                    if self.pid != 1 {
+                        log!("xnu: pid {} crashed: CPU error {e:?}", self.pid);
+                        self.exit_process(4); // SIGILL
+                        if let Some(idx) = self.pick_thread() {
+                            self.switch_to(idx);
+                        }
+                        continue;
+                    }
                     return Err(format!(
                         "CPU error {e:?} in thread {}",
                         self.threads[self.current].id

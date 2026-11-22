@@ -578,6 +578,16 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             let Some(FileKind::Socket(s)) = k.vfs.fds.get_mut(&args[0]).map(|f| &mut f.kind) else {
                 return Ret::Err(ENOTSOCK);
             };
+            const MSG_PEEK: u32 = 2;
+            let mut peeked = Vec::new();
+            if !send && args[2] & MSG_PEEK != 0 {
+                let len = (0..iovcnt)
+                    .map(|i| read_u32(&k.mem, iov + 8 * i + 4) as usize)
+                    .sum();
+                peeked.resize(len, 0);
+                let n = s.peek(&mut peeked);
+                peeked.truncate(n);
+            }
             let mut total = 0;
             for i in 0..iovcnt {
                 let base = read_u32(&k.mem, iov + 8 * i);
@@ -586,7 +596,13 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                     total += s.write(&read_bytes(&k.mem, base, len));
                 } else {
                     let mut buf = vec![0u8; len as usize];
-                    let n = s.read(&mut buf);
+                    let n = if args[2] & MSG_PEEK != 0 {
+                        let n = buf.len().min(peeked.len() - total);
+                        buf[..n].copy_from_slice(&peeked[total..total + n]);
+                        n
+                    } else {
+                        s.read(&mut buf)
+                    };
                     write_bytes(&mut k.mem, base, &buf[..n]);
                     total += n;
                     if n < buf.len() {

@@ -5,6 +5,58 @@
  */
 //! Cross-platform memory management wrappers using the host's system calls.
 
+#[cfg(target_os = "emscripten")]
+pub(super) fn allocate_window(size: usize) -> std::io::Result<*mut core::ffi::c_void> {
+    unsafe extern "C" {
+        fn sbrk(increment: isize) -> *mut core::ffi::c_void;
+    }
+
+    // wasm32 Emscripten's program break only grows. Reserve fresh zeroed
+    // bytes without mmap's eager clear; dropped windows stay in our pool.
+    let page_mask = super::PAGE_SIZE as usize - 1;
+    let reserve = (size + page_mask).try_into().unwrap();
+    let ptr = unsafe { sbrk(reserve) };
+    if ptr == core::ptr::without_provenance_mut(usize::MAX) {
+        // malloc may still be able to reuse a hole below the break.
+        return unsafe { allocate_memory(size) };
+    }
+    Ok(ptr.wrapping_byte_add(ptr.addr().wrapping_neg() & page_mask))
+}
+
+#[cfg(all(target_os = "emscripten", test))]
+mod tests {
+    #[test]
+    fn fresh_windows_are_aligned_zero_and_disjoint_from_the_heap() {
+        let size = 3 * crate::mem::PAGE_SIZE as usize;
+        let window = || {
+            let ptr = super::allocate_window(size).unwrap().cast::<u8>();
+            assert_eq!(ptr.addr() % crate::mem::PAGE_SIZE as usize, 0);
+            ptr
+        };
+        let first_ptr = window();
+        let first = unsafe { std::slice::from_raw_parts_mut(first_ptr, size) };
+        assert!(first.iter().all(|&byte| byte == 0));
+        first.fill(1);
+        let heap = vec![2u8; 8 * 1024 * 1024];
+        let second_ptr = window();
+        let ranges = [
+            first_ptr.addr()..first_ptr.addr() + size,
+            heap.as_ptr().addr()..heap.as_ptr().addr() + heap.len(),
+            second_ptr.addr()..second_ptr.addr() + size,
+        ];
+        for (i, a) in ranges.iter().enumerate() {
+            assert!(ranges[..i]
+                .iter()
+                .all(|b| a.end <= b.start || b.end <= a.start));
+        }
+        let second = unsafe { std::slice::from_raw_parts_mut(second_ptr, size) };
+        assert!(second.iter().all(|&byte| byte == 0));
+        second.fill(3);
+        assert!(first.iter().all(|&byte| byte == 1));
+        assert!(heap.iter().all(|&byte| byte == 2));
+    }
+}
+
 /// Cross-platform memory allocation using the host's system calls.
 /// Returns an address aligned to the guest's 4KB page boundaries.
 ///

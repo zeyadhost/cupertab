@@ -220,10 +220,10 @@ type Bytes = [u8; WINDOW_SIZE];
 #[cfg(target_os = "emscripten")]
 const WINDOW_TOP_RESERVED: VAddr = 16 * 1024 * 1024;
 
-/// Windows of dropped [Mem]s. WebAssembly memory never shrinks and a freed
-/// window can't always be reallocated in place, so they are reused instead.
 #[cfg(target_os = "emscripten")]
 thread_local! {
+    /// Windows of dropped [Mem]s. WebAssembly memory never shrinks and a freed
+    /// window can't always be reallocated in place, so they are reused instead.
     static SPARE_WINDOWS: std::cell::RefCell<Vec<*mut u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }

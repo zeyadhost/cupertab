@@ -146,8 +146,13 @@ impl Kernel {
         fw: Firmware,
         overlay_dir: &Path,
         exe_path: &str,
-        argv: Vec<String>,
+        mut argv: Vec<String>,
     ) -> Result<Kernel, String> {
+        // Emulated apps start far slower than on a phone, so turn off
+        // SpringBoard's launch watchdog, as when debugging on a device.
+        if exe_path.ends_with("/SpringBoard") {
+            argv.extend(["-SBNoWatchdogs".to_string(), "YES".to_string()]);
+        }
         let (mem, vm, cpu) = Self::load_image(&fw, exe_path, &argv, Vec::new())?;
 
         let mut ipc = mach::Ipc::new();

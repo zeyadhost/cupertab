@@ -177,7 +177,10 @@ impl Firmware {
             info.build,
             info.rootfs_name
         );
-        let image_path = Self::extract_rootfs(ipsw_path, cache_dir, &info)?;
+        let (image_path, extracted) = Self::extract_rootfs(ipsw_path, cache_dir, &info)?;
+        if !extracted {
+            log!("Using cached root filesystem image");
+        }
         let file = std::fs::File::open(&image_path).map_err(|e| e.to_string())?;
         let len = file.metadata().map_err(|e| e.to_string())?.len();
         let file = FileReadAt(RefCell::new(file));
@@ -216,7 +219,12 @@ impl Firmware {
             extern "C" {
                 fn emscripten_run_script(script: *const std::ffi::c_char);
             }
-            unsafe { emscripten_run_script(c"globalThis.touchHLEFirmwareReady?.()".as_ptr()) };
+            let script = if extracted {
+                c"globalThis.touchHLEFirmwareReady?.(true)"
+            } else {
+                c"globalThis.touchHLEFirmwareReady?.(false)"
+            };
+            unsafe { emscripten_run_script(script.as_ptr()) };
             crate::web_yield(true);
         }
         Ok(Firmware { info, volume })
@@ -226,33 +234,28 @@ impl Firmware {
         ipsw_path: &Path,
         cache_dir: &Path,
         info: &IpswInfo,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<(PathBuf, bool), String> {
         let file = std::fs::File::open(ipsw_path).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         let mut entry = zip
             .by_name(&info.rootfs_name)
             .map_err(|_| format!("IPSW has no {}", info.rootfs_name))?;
-        #[cfg(target_os = "emscripten")]
-        let out_path = cache_dir.join(format!("{:08x}-{}.dmg", entry.crc32(), entry.size()));
-        #[cfg(not(target_os = "emscripten"))]
         let out_path = cache_dir.join(format!(
             "{}_{}_{}",
             info.product_type, info.build, info.rootfs_name
         ));
+        // The page only supplies this file when the IPSW's SHA-256 matches.
+        #[cfg(target_os = "emscripten")]
+        let out_path = if cache_dir == Path::new(WEB_ROOTFS_CACHE) {
+            cache_dir.join("rootfs.dmg")
+        } else {
+            out_path
+        };
         if std::fs::metadata(&out_path).is_ok_and(|m| m.len() == entry.size()) {
-            log!("Using cached root filesystem image");
-            return Ok(out_path);
+            return Ok((out_path, false));
         }
         log!("Extracting root filesystem image to {}", out_path.display());
         std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
-        #[cfg(target_os = "emscripten")]
-        if cache_dir == Path::new(WEB_ROOTFS_CACHE) {
-            // Keep one image; a different IPSW replaces it after validation.
-            for file in std::fs::read_dir(cache_dir).map_err(|e| e.to_string())? {
-                std::fs::remove_file(file.map_err(|e| e.to_string())?.path())
-                    .map_err(|e| e.to_string())?;
-            }
-        }
         let tmp_path = out_path.with_extension("part");
         let mut out = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
         #[cfg(not(target_os = "emscripten"))]
@@ -272,7 +275,7 @@ impl Firmware {
         }
         drop(out);
         std::fs::rename(&tmp_path, &out_path).map_err(|e| e.to_string())?;
-        Ok(out_path)
+        Ok((out_path, true))
     }
 }
 

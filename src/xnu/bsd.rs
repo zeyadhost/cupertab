@@ -802,6 +802,10 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 }
                 // F_NOCACHE, F_RDADVISE, F_FULLFSYNC, F_SETLK..., F_ADDSIGS
                 48 | 44 | 51 | 7 | 8 | 9 | 59 | 61 => ok(0),
+                // F_GETPROTECTIONCLASS and F_SETPROTECTIONCLASS (iOS 4
+                // numbering): files are class D, readable while locked.
+                62 => ok(4),
+                63 => ok(0),
                 _ => {
                     log!("xnu: fcntl({fd}, {cmd}) unhandled");
                     Ret::Err(EINVAL)

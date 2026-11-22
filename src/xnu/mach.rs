@@ -44,6 +44,8 @@ pub enum KObject {
     },
     /// A user client connection to an I/O Registry entry.
     IoConnect(usize),
+    /// notifyd's `com.apple.system.notification_center` server.
+    Notifyd,
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +67,7 @@ pub struct Ipc {
     pub services: HashMap<String, u32>,
     /// mk_timer ports and their armed deadlines (absolute time).
     pub timers: HashMap<u32, Option<u64>>,
+    pub notifyd: super::notifyd::Notifyd,
 }
 
 impl Ipc {
@@ -77,10 +80,14 @@ impl Ipc {
             bootstrap_port: 0,
             services: HashMap::new(),
             timers: HashMap::new(),
+            notifyd: Default::default(),
         };
         ipc.task_port = ipc.new_kernel_port(KObject::Task);
         ipc.host_port = ipc.new_kernel_port(KObject::Host);
         ipc.bootstrap_port = ipc.new_port();
+        let notifyd = ipc.new_kernel_port(KObject::Notifyd);
+        ipc.services
+            .insert("com.apple.system.notification_center".to_string(), notifyd);
         ipc
     }
     pub fn new_port(&mut self) -> u32 {
@@ -252,6 +259,9 @@ impl Kernel {
                 return r(MIG_BAD_ID);
             }
             return rep;
+        }
+        if matches!(obj, KObject::Notifyd) {
+            return super::notifyd::msg(self, msg);
         }
         match id {
             // mach_port_allocate(task, right, &name)

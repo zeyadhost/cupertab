@@ -15,6 +15,7 @@ mod iokit;
 mod loader;
 pub mod lockdown;
 mod mach;
+mod notifyd;
 mod vfs;
 mod vm;
 

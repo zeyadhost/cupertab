@@ -522,8 +522,28 @@ impl Kernel {
                     return r(KERN_INVALID_ARGUMENT);
                 }
                 let offset = src_addr % super::vm::PAGE;
-                let len = super::vm::round_up(offset + size);
                 let base = src_addr - offset;
+                let end = base as u64 + ((offset as u64 + size as u64 + 0xfff) & !0xfff);
+                if size == 0 || end > 1 << 32 {
+                    return r(KERN_INVALID_ARGUMENT);
+                }
+                let len = (end - base as u64) as u32;
+                // Every source page has to be mapped.
+                let src_vm = if src_pid == self.pid {
+                    &self.vm
+                } else {
+                    match self.parked.get(&src_pid) {
+                        Some(p) => &p.vm,
+                        None => return r(KERN_INVALID_ARGUMENT),
+                    }
+                };
+                let mut at = base as u64;
+                while at < end {
+                    match src_vm.region_at(at as u32) {
+                        Some((b, region)) => at = b as u64 + region.size as u64,
+                        None => return r(KERN_INVALID_ADDRESS),
+                    }
+                }
                 let bytes = match self.mem_for(src_pid) {
                     Some(mem) => read_bytes(mem, base, len),
                     None => return r(KERN_INVALID_ARGUMENT),

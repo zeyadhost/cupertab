@@ -103,6 +103,10 @@ pub struct Kernel {
     pub threads: Vec<Thread>,
     pub current: usize,
     pub start: std::time::Instant,
+    /// Host time the emulator was not scheduled for (a hidden browser tab, a
+    /// suspended process), which the guest's clock skips.
+    stalled: std::time::Duration,
+    last_tick: std::time::Instant,
     pub exit_status: Option<i32>,
     pub bsdthread_start: u32,
     pub pthread_size: u32,
@@ -186,6 +190,8 @@ impl Kernel {
             }],
             current: 0,
             start: std::time::Instant::now(),
+            stalled: std::time::Duration::ZERO,
+            last_tick: std::time::Instant::now(),
             exit_status: None,
             bsdthread_start: 0,
             pthread_size: 0,
@@ -246,7 +252,7 @@ impl Kernel {
     }
 
     pub fn now_ns(&self) -> u64 {
-        self.start.elapsed().as_nanos() as u64
+        self.start.elapsed().saturating_sub(self.stalled).as_nanos() as u64
     }
 
     /// mach_absolute_time ticks: we use a 24 MHz timebase like the device.
@@ -423,6 +429,12 @@ impl Kernel {
                 }
                 _ => continue,
             };
+            // With the display off (the LCD shows no surface) a tap presses
+            // Home, which wakes it, instead of going to a dark lock screen.
+            if self.iokit.presented_surface == 0 {
+                home |= phase == TouchPhase::Down;
+                continue;
+            }
             if let Some(&(x, y)) = map.values().next() {
                 touches.push((phase, (x / width as f32, y / height as f32)));
             }
@@ -473,6 +485,16 @@ impl Kernel {
     pub fn run(&mut self) -> Result<i32, String> {
         let mut ticks_left: u64;
         loop {
+            // A long gap between iterations means the host stopped running us
+            // (browsers throttle hidden tabs to about one timer a minute). The
+            // guest's clock skips it, so SpringBoard doesn't wake up to find
+            // its auto-lock long overdue.
+            let now = std::time::Instant::now();
+            let gap = now - self.last_tick;
+            self.last_tick = now;
+            if gap > std::time::Duration::from_millis(250) {
+                self.stalled += gap - std::time::Duration::from_millis(16);
+            }
             if self.last_present.elapsed() >= std::time::Duration::from_millis(16) {
                 self.present();
             }

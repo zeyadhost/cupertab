@@ -105,6 +105,7 @@ struct Parked {
     task_port: u32,
     bsdthread_start: u32,
     pthread_size: u32,
+    mbx_command_buffer: u32,
 }
 
 pub struct Kernel {
@@ -393,6 +394,10 @@ impl Kernel {
         std::mem::swap(&mut self.ipc.task_port, &mut p.task_port);
         std::mem::swap(&mut self.bsdthread_start, &mut p.bsdthread_start);
         std::mem::swap(&mut self.pthread_size, &mut p.pthread_size);
+        std::mem::swap(
+            &mut self.iokit.mbx_command_buffer,
+            &mut p.mbx_command_buffer,
+        );
         let old = std::mem::replace(&mut self.pid, pid);
         // A process with no threads left is gone, memory and all.
         if self.threads.iter().any(|t| t.pid == old && !t.exited) {
@@ -423,6 +428,7 @@ impl Kernel {
                 task_port,
                 bsdthread_start: 0,
                 pthread_size: 0,
+                mbx_command_buffer: 0,
             },
         );
         let tid = self.next_tid;

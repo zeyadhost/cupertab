@@ -50,10 +50,10 @@ pub enum KObject {
     Notifyd,
     /// installd's `com.apple.mobile.installd` server.
     Installd,
-    /// A daemon that isn't emulated. Its requests fail at once: if the
-    /// lookup failed instead, clients such as AudioToolbox would retry it
-    /// with a sleep on the calling thread, stalling SpringBoard's event loop.
-    Unavailable,
+    MediaServer {
+        system_sound_port: u32,
+    },
+    SystemSound,
 }
 
 #[derive(Debug, Default)]
@@ -106,7 +106,8 @@ impl Ipc {
         let installd = ipc.new_kernel_port(KObject::Installd);
         ipc.services
             .insert("com.apple.mobile.installd".to_string(), installd);
-        let mediaserverd = ipc.new_kernel_port(KObject::Unavailable);
+        let system_sound_port = ipc.new_kernel_port(KObject::SystemSound);
+        let mediaserverd = ipc.new_kernel_port(KObject::MediaServer { system_sound_port });
         ipc.services
             .insert("com.apple.mediaserverd".to_string(), mediaserverd);
         ipc
@@ -287,8 +288,16 @@ impl Kernel {
         if matches!(obj, KObject::Installd) {
             return super::installd::msg(self, msg);
         }
-        if matches!(obj, KObject::Unavailable) {
-            return r(MIG_BAD_ID);
+        if let KObject::MediaServer { system_sound_port } = obj {
+            return Some(media_server_reply(msg, system_sound_port));
+        }
+        if obj == KObject::SystemSound {
+            return match id {
+                // One-way AudioServices set-active and play requests. No host
+                // audio is played by this stub.
+                24007 | 24010 if le(msg, 12) == 0 => None,
+                _ => r(MIG_BAD_ID),
+            };
         }
         match id {
             // mach_port_allocate(task, right, &name)
@@ -827,6 +836,22 @@ impl Kernel {
     }
 }
 
+fn media_server_reply(msg: &[u8], system_sound_port: u32) -> Vec<u8> {
+    const FIND_SUB_SERVER: u32 = 42000;
+    const SYSTEM_SOUND: u32 = 1;
+    // AudioToolbox retries this lookup on the caller's thread if it fails.
+    // Hand it the silent System Sound endpoint rather than leaving it waiting.
+    if msg.len() == 36
+        && le(msg, 0) & 0x80000000 == 0
+        && le(msg, 20) == FIND_SUB_SERVER
+        && le(msg, 32) == SYSTEM_SOUND
+    {
+        reply(msg, &[], &[(system_sound_port, MACH_MSG_TYPE_PORT_SEND)])
+    } else {
+        reply(msg, &[MIG_BAD_ID], &[])
+    }
+}
+
 /// The bootstrap port (launchd's job server). There is a single task, so
 /// services registered or checked in are simply looked up by name.
 const MACH_MSG_TYPE_PORT_SEND_ONCE_RCV: u32 = 18;
@@ -1255,5 +1280,39 @@ pub fn bsd_extra(k: &mut Kernel, num: u32) -> Option<Ret> {
             let _ = read_u32;
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_server_only_resolves_system_sound() {
+        let ipc = Ipc::new();
+        let server = ipc.services["com.apple.mediaserverd"];
+        let Some(KObject::MediaServer { system_sound_port }) = ipc.ports[&server].kobject else {
+            panic!("missing media server");
+        };
+        assert_eq!(
+            ipc.ports[&system_sound_port].kobject,
+            Some(KObject::SystemSound)
+        );
+        let mut request = [0; 36];
+        request[12..16].copy_from_slice(&0x503u32.to_le_bytes());
+        request[20..24].copy_from_slice(&42000u32.to_le_bytes());
+        request[32..36].copy_from_slice(&1u32.to_le_bytes());
+        let response = media_server_reply(&request, system_sound_port);
+        assert_eq!(response.len(), 40);
+        assert_eq!(le(&response, 12), 0x503);
+        assert_eq!(le(&response, 20), 42100);
+        assert_eq!(le(&response, 24), 1);
+        assert_eq!(le(&response, 28), system_sound_port);
+        assert_eq!(response[38], MACH_MSG_TYPE_PORT_SEND as u8);
+
+        request[32] = 2;
+        let response = media_server_reply(&request, system_sound_port);
+        assert_eq!(le(&response, 0) & 0x80000000, 0);
+        assert_eq!(le(&response, 32), MIG_BAD_ID);
     }
 }

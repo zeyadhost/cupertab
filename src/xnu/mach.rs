@@ -501,6 +501,65 @@ impl Kernel {
             }
             // vm_protect / mach_vm_protect
             3803 | 4802 => r(KERN_SUCCESS),
+            // mach_vm_remap(target, &addr, size, mask, flags, src_task,
+            // src_addr, copy, &cur, &max, inherit). Each process has its own
+            // memory here, so the pages are copied either way.
+            4813 => {
+                let (addr, size, mask, flags, src_addr) = (arg(0), arg(1), arg(2), arg(3), arg(4));
+                let src_pid = self
+                    .ipc
+                    .ports
+                    .get(&le(msg, 28))
+                    .and_then(|p| match p.kobject {
+                        Some(KObject::Task(pid)) => Some(pid),
+                        _ => None,
+                    });
+                let Some(src_pid) = src_pid else {
+                    return r(KERN_INVALID_ARGUMENT);
+                };
+                let offset = src_addr % super::vm::PAGE;
+                let len = super::vm::round_up(offset + size);
+                let base = src_addr - offset;
+                let bytes = match self.mem_for(src_pid) {
+                    Some(mem) => read_bytes(mem, base, len),
+                    None => return r(KERN_INVALID_ARGUMENT),
+                };
+                match self.vm_allocate(addr, len, mask, flags, "vm_remap") {
+                    Some(a) => {
+                        write_bytes(&mut self.mem, a, &bytes);
+                        Some(reply(msg, &[KERN_SUCCESS, a + offset, 3, 7], &[]))
+                    }
+                    None => r(KERN_NO_SPACE),
+                }
+            }
+            // vm_region / mach_vm_region(task, addr, flavor, count). On
+            // 32-bit ARM mach_vm addresses are 32-bit too.
+            3800 | 4816 => {
+                let addr = arg(0);
+                let count = arg(2).min(10);
+                let pid = match obj {
+                    KObject::Task(pid) => pid,
+                    _ => self.pid,
+                };
+                let vm = if pid == self.pid {
+                    &self.vm
+                } else {
+                    match self.parked.get(&pid) {
+                        Some(p) => &p.vm,
+                        None => return r(KERN_INVALID_ARGUMENT),
+                    }
+                };
+                let Some((base, region)) = vm.region_from(addr) else {
+                    return r(KERN_INVALID_ADDRESS);
+                };
+                // protection, max_protection, inheritance (copy), the rest 0.
+                let mut info = vec![region.prot.0, 7, 1];
+                info.resize(count as usize, 0);
+                let mut words = vec![base, region.size];
+                words.push(count);
+                words.extend(info);
+                Some(reply(msg, &words, &[(0, MACH_MSG_TYPE_PORT_SEND)]))
+            }
             // host_info, host_statistics, task_info, thread_info: zeros
             200 | 219 | 3405 | 3612 => {
                 let count = arg(1);

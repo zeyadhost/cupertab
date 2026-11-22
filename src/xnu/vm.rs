@@ -143,6 +143,12 @@ impl VmMap {
         }
     }
 
+    /// The region containing `addr`, or else the next one above it.
+    pub fn region_from(&self, addr: u32) -> Option<(u32, &Region)> {
+        self.region_at(addr)
+            .or_else(|| self.regions.range(addr..).next().map(|(&b, r)| (b, r)))
+    }
+
     pub fn region_at(&self, addr: u32) -> Option<(u32, &Region)> {
         self.regions
             .range(..=addr)

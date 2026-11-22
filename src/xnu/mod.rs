@@ -784,7 +784,7 @@ impl Kernel {
                 self.start_jobs();
                 #[cfg(target_os = "emscripten")]
                 {
-                    // Loading a guest process can take as long as a suspended tab.
+                    // Process load time is not browser suspension.
                     self.last_tick = std::time::Instant::now();
                 }
             }
@@ -821,7 +821,7 @@ impl Kernel {
                     self.syscall();
                     #[cfg(target_os = "emscripten")]
                     {
-                        // Synchronous guest I/O also belongs in the guest clock.
+                        // Keep synchronous I/O in the guest clock.
                         self.last_tick = std::time::Instant::now();
                     }
                     if std::mem::take(&mut self.yield_requested) {

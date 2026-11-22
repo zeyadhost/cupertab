@@ -17,6 +17,7 @@ mod loader;
 pub mod lockdown;
 mod mach;
 mod notifyd;
+mod testinput;
 mod vfs;
 mod vm;
 
@@ -119,6 +120,7 @@ pub struct Kernel {
     pub window: Option<Box<crate::window::Window>>,
     pub last_present: std::time::Instant,
     next_tid: u64,
+    test_input: Vec<(u64, testinput::Action)>,
 }
 
 impl Kernel {
@@ -203,6 +205,7 @@ impl Kernel {
             window: None,
             last_present: std::time::Instant::now(),
             next_tid: 1,
+            test_input: testinput::parse(),
         })
     }
 
@@ -510,6 +513,9 @@ impl Kernel {
                 // Presenting yields to the browser, which may not come back
                 // for a while.
                 self.skip_stall();
+            }
+            if !self.test_input.is_empty() {
+                self.run_test_input();
             }
             if let Some(status) = self.exit_status {
                 return Ok(status);

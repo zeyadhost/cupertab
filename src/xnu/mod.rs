@@ -461,6 +461,8 @@ impl Kernel {
     /// Ends a parked process and frees its memory, as jetsam does.
     fn kill_process(&mut self, pid: u32) {
         if pid == self.pid {
+            // Its memory goes once the scheduler switches away from it.
+            self.exit_process(9);
             return;
         }
         for t in self.threads.iter_mut().filter(|t| t.pid == pid) {

@@ -164,6 +164,8 @@ pub enum Event {
     /// take over.
     EnterDebugger,
     TextInput(TextInputEvent),
+    /// The Home key was pressed, for the device's Home button.
+    HomeButton,
 }
 
 pub enum BatteryState {
@@ -886,6 +888,11 @@ impl Window {
                     echo!("F12 pressed, EnterDebugger event queued.");
                     Event::EnterDebugger
                 }
+                E::KeyDown {
+                    keycode: Some(sdl2::keyboard::Keycode::Home),
+                    repeat: false,
+                    ..
+                } => Event::HomeButton,
                 E::KeyDown {
                     keycode: Some(sdl2::keyboard::Keycode::Backspace),
                     ..

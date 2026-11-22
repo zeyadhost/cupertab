@@ -218,6 +218,8 @@ impl Kernel {
             m.refs += 1;
             return ok(m.addr);
         }
+        // Map the whole object, so smaller mappings later share this one.
+        let size = size.max(round_up(shm.borrow().data.len() as u32));
         let Some(base) = self
             .vm
             .map_anywhere(0, size, 0, Prot::from_bits(prot), "shm".into())
@@ -237,6 +239,20 @@ impl Kernel {
             shm,
         });
         ok(base)
+    }
+
+    /// Writes back and forgets the shared memory mappings overlapping a range
+    /// that is about to be unmapped or replaced.
+    fn shm_forget(&mut self, addr: u32, size: u32) {
+        let end = addr.saturating_add(size);
+        while let Some(i) = self
+            .vfs
+            .shm_maps
+            .iter()
+            .position(|m| m.addr < end && addr < m.addr + m.len)
+        {
+            self.shm_unmapped(i);
+        }
     }
 
     /// Copies a shared memory mapping back into its object and forgets it.
@@ -282,14 +298,7 @@ impl Kernel {
             None
         };
         if flags & MAP_FIXED != 0 {
-            while let Some(i) = self
-                .vfs
-                .shm_maps
-                .iter()
-                .position(|m| m.addr < addr.saturating_add(size) && addr < m.addr + m.len)
-            {
-                self.shm_unmapped(i);
-            }
+            self.shm_forget(addr, size);
         }
         let base = if flags & MAP_FIXED != 0 {
             if self
@@ -562,14 +571,16 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         60 => ok(0o022),
         73 => {
-            if let Some(i) = k.vfs.shm_maps.iter().position(|m| m.addr == args[0]) {
-                let m = &mut k.vfs.shm_maps[i];
+            if let Some(m) = k
+                .vfs
+                .shm_maps
+                .iter_mut()
+                .find(|m| m.addr == args[0] && m.refs > 1)
+            {
                 m.refs -= 1;
-                if m.refs > 0 {
-                    return ok(0);
-                }
-                k.shm_unmapped(i);
+                return ok(0);
             }
+            k.shm_forget(args[0], args[1]);
             k.vm.unmap(args[0], args[1]);
             ok(0)
         }

@@ -427,6 +427,14 @@ impl Kernel {
                 touches.push((phase, (x / width as f32, y / height as f32)));
             }
         }
+        // The digitizer reports at most one move per frame, so moves queued
+        // since the last frame collapse into the latest.
+        touches.dedup_by(|next, prev| {
+            next.0 == iokit::TouchPhase::Move && prev.0 == iokit::TouchPhase::Move && {
+                prev.1 = next.1;
+                true
+            }
+        });
         for (phase, pos) in touches {
             self.hid_touch(phase, pos);
         }

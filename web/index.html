@@ -56,10 +56,19 @@ and run entirely in this tab.</p>
   const label = document.getElementById('pick-label');
   const ipswInput = document.getElementById('ipsw');
   const ipswLabel = document.getElementById('ipsw-label');
-  function log(text) {
-    logEl.textContent += text + '\n';
-    if (logEl.textContent.length > 200000) logEl.textContent = logEl.textContent.slice(-100000);
+  // Lines are batched into one DOM update per frame, since touchHLE can log
+  // hundreds of lines a second and each update re-lays out the page.
+  let pendingLog = '';
+  function flushLog() {
+    let text = logEl.textContent + pendingLog;
+    pendingLog = '';
+    if (text.length > 200000) text = text.slice(-100000);
+    logEl.textContent = text;
     logEl.scrollTop = logEl.scrollHeight;
+  }
+  function log(text) {
+    if (!pendingLog) requestAnimationFrame(flushLog);
+    pendingLog += text + '\n';
   }
   var Module = {
     canvas: document.getElementById('canvas'),

@@ -73,6 +73,8 @@ pub struct Ipc {
     pub bootstrap_port: u32,
     /// Bootstrap services by name.
     pub services: HashMap<String, u32>,
+    /// Missing services already reported, so repeated look-ups stay quiet.
+    pub missing_services: std::collections::HashSet<String>,
     /// mk_timer ports and their armed deadlines (absolute time).
     pub timers: HashMap<u32, Option<u64>>,
     pub notifyd: super::notifyd::Notifyd,
@@ -87,6 +89,7 @@ impl Ipc {
             host_port: 0,
             bootstrap_port: 0,
             services: HashMap::new(),
+            missing_services: Default::default(),
             timers: HashMap::new(),
             notifyd: Default::default(),
         };
@@ -758,7 +761,9 @@ pub fn bootstrap_msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
                 Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_SEND)]))
             }
             None => {
-                log!("xnu: bootstrap_look_up({name:?}): no such service");
+                if k.trace || k.ipc.missing_services.insert(name.clone()) {
+                    log!("xnu: bootstrap_look_up({name:?}): no such service");
+                }
                 Some(reply(msg, &[BOOTSTRAP_UNKNOWN_SERVICE], &[]))
             }
         },

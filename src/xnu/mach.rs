@@ -517,6 +517,10 @@ impl Kernel {
                 let Some(src_pid) = src_pid else {
                     return r(KERN_INVALID_ARGUMENT);
                 };
+                if matches!(obj, KObject::Task(t) if t != self.pid) {
+                    // Only remapping into the calling task is supported.
+                    return r(KERN_INVALID_ARGUMENT);
+                }
                 let offset = src_addr % super::vm::PAGE;
                 let len = super::vm::round_up(offset + size);
                 let base = src_addr - offset;

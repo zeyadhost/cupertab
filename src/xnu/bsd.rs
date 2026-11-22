@@ -97,6 +97,13 @@ impl Kernel {
             [6, 14] => i(103_000_000),
             [6, 23] => i(24_000_000),
             [6, 13] => i(32),
+            // KERN_PROC_PID: a running, untraced kinfo_proc (492 bytes).
+            &[1, 14, 1, pid] if pid == self.pid || self.parked.contains_key(&pid) => {
+                let mut kp = vec![0u8; 492];
+                kp[20] = 2; // p_stat: SRUN
+                kp[24..28].copy_from_slice(&pid.to_le_bytes());
+                Some(kp)
+            }
             _ => None,
         }
     }

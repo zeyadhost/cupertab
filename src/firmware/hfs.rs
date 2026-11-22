@@ -422,7 +422,8 @@ impl<R: ReadAt> Volume<R> {
             return Err(bad("bad decmpfs header"));
         }
         let size = self.size(node) as usize;
-        // A chunk starting with 0xff is stored, anything else is zlib.
+        // A resource fork chunk starting with 0xff is stored, anything else is
+        // zlib.
         let chunk = |c: &[u8], out: &mut Vec<u8>| -> io::Result<()> {
             match c.first() {
                 Some(0xff) => out.extend_from_slice(&c[1..]),
@@ -435,8 +436,12 @@ impl<R: ReadAt> Volume<R> {
         };
         let mut out = Vec::with_capacity(size);
         match le32(x, 4)? {
-            // Inline in the attribute.
-            3 => chunk(&x[16..], &mut out)?,
+            // Inline in the attribute, stored if the first byte's low nibble
+            // is 0xf.
+            3 => match x.get(16) {
+                Some(b) if b & 0x0f == 0x0f => out.extend_from_slice(&x[17..]),
+                _ => chunk(&x[16..], &mut out)?,
+            },
             // In the resource fork: a resource header whose first word is
             // the data offset, then a data length, a chunk count and
             // (offset, length) pairs relative to the chunk count.

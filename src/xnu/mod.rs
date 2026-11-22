@@ -117,6 +117,8 @@ pub struct Kernel {
     pub cpu: Cpu,
     pub vm: VmMap,
     pub fw: Firmware,
+    /// Pristine firmware bytes, copied into each process's private mappings.
+    shared_cache: Vec<u8>,
     pub vfs: vfs::Vfs,
     pub ipc: mach::Ipc,
     pub iokit: iokit::Registry,
@@ -160,7 +162,9 @@ impl Kernel {
             argv.extend(["-SBNoWatchdogs".to_string(), "YES".to_string()]);
         }
         let vfs = vfs::Vfs::new(overlay_dir);
-        let (mem, vm, cpu) = Self::load_image(&fw, &vfs, exe_path, &argv, Vec::new())?;
+        let shared_cache = Self::read_fw_file(&fw, SHARED_CACHE_PATH)?;
+        let (mem, vm, cpu) =
+            Self::load_image(&fw, &vfs, &shared_cache, exe_path, &argv, Vec::new())?;
 
         let mut ipc = mach::Ipc::new();
         let thread_port = ipc.new_kernel_port(mach::KObject::Thread(0));
@@ -170,6 +174,7 @@ impl Kernel {
             cpu,
             vm,
             fw,
+            shared_cache,
             vfs,
             iokit,
             ipc,
@@ -208,6 +213,7 @@ impl Kernel {
     fn load_image(
         fw: &Firmware,
         vfs: &vfs::Vfs,
+        shared_cache: &[u8],
         exe_path: &str,
         argv: &[String],
         env: Vec<String>,
@@ -240,9 +246,7 @@ impl Kernel {
 
         // The shared region is set up by the kernel (as if launchd had already
         // mapped it), so dyld's shared_region_check_np finds it.
-        let cache = Self::read_fw_file(fw, SHARED_CACHE_PATH)?;
-        Self::map_shared_cache(&mut mem, &mut vm, &cache)?;
-        drop(cache);
+        Self::map_shared_cache(&mut mem, &mut vm, shared_cache)?;
 
         vm.map_fixed(STACK_TOP - STACK_SIZE, STACK_SIZE, Prot::RW, "stack".into())?;
         vm.map_fixed(COMM_PAGE, 0x1000, Prot(1), "commpage".into())?;
@@ -434,7 +438,14 @@ impl Kernel {
         argv: Vec<String>,
         env: Vec<String>,
     ) -> Result<(), String> {
-        let (mem, vm, cpu) = Self::load_image(&self.fw, &self.vfs, exe_path, &argv, env)?;
+        let (mem, vm, cpu) = Self::load_image(
+            &self.fw,
+            &self.vfs,
+            &self.shared_cache,
+            exe_path,
+            &argv,
+            env,
+        )?;
         let task_port = self.ipc.new_kernel_port(mach::KObject::Task(pid));
         let id = self.threads.len() as u32;
         let port = self.ipc.new_kernel_port(mach::KObject::Thread(id));
@@ -1038,4 +1049,35 @@ pub fn boot_firmware(
     let status = kernel.run()?;
     log!("xnu: process exited with status {status}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_cache_mappings_start_with_pristine_data() {
+        let addr = 0x3e00_0000u32;
+        let mut cache = vec![0; 68];
+        cache[..7].copy_from_slice(b"dyld_v1");
+        cache[16..20].copy_from_slice(&32u32.to_le_bytes());
+        cache[20..24].copy_from_slice(&1u32.to_le_bytes());
+        cache[32..40].copy_from_slice(&u64::from(addr).to_le_bytes());
+        cache[40..48].copy_from_slice(&4u64.to_le_bytes());
+        cache[48..56].copy_from_slice(&64u64.to_le_bytes());
+        cache[60..64].copy_from_slice(&3u32.to_le_bytes());
+        cache[64..].copy_from_slice(b"data");
+
+        let mut mem = Mem::new();
+        let mut vm = VmMap::new(0x1000, 0x2f00_0000);
+        Kernel::map_shared_cache(&mut mem, &mut vm, &cache).unwrap();
+        assert_eq!(read_bytes(&mem, addr, 4), b"data");
+
+        write_bytes(&mut mem, addr, b"edit");
+        drop(mem);
+        let mut mem = Mem::new();
+        let mut vm = VmMap::new(0x1000, 0x2f00_0000);
+        Kernel::map_shared_cache(&mut mem, &mut vm, &cache).unwrap();
+        assert_eq!(read_bytes(&mem, addr, 4), b"data");
+    }
 }

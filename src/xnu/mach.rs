@@ -29,7 +29,7 @@ pub const MIG_BAD_ID: u32 = (-303i32) as u32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum KObject {
-    Task,
+    Task(u32),
     Thread(u32),
     Host,
     Semaphore {
@@ -58,7 +58,10 @@ pub enum KObject {
 #[derive(Debug, Default)]
 pub struct Port {
     pub kobject: Option<KObject>,
-    pub queue: VecDeque<Vec<u8>>,
+    /// Queued messages and the PID of each one's sender.
+    /// Messages with their sender's PID and the contents of their
+    /// out-of-line descriptors, copied when they were sent.
+    pub queue: VecDeque<(Vec<u8>, u32, Vec<Vec<u8>>)>,
     /// Port sets this port belongs to. As in XNU, a port can be in several:
     /// CFRunLoop adds each source's port to every mode's set.
     pub sets: Vec<u32>,
@@ -93,7 +96,7 @@ impl Ipc {
             timers: HashMap::new(),
             notifyd: Default::default(),
         };
-        ipc.task_port = ipc.new_kernel_port(KObject::Task);
+        ipc.task_port = ipc.new_kernel_port(KObject::Task(1));
         ipc.host_port = ipc.new_kernel_port(KObject::Host);
         ipc.bootstrap_port = ipc.new_port();
         let notifyd = ipc.new_kernel_port(KObject::Notifyd);
@@ -184,7 +187,7 @@ impl Kernel {
                 }
                 m.resize(48, 0);
                 if let Some(p) = self.ipc.ports.get_mut(&port) {
-                    p.queue.push_back(m);
+                    p.queue.push_back((m, 1, Vec::new()));
                 }
             }
         }
@@ -195,7 +198,7 @@ impl Kernel {
                 // One frame waits at most, as a display only has one.
                 if let Some(p) = self.ipc.ports.get_mut(&v.port) {
                     if p.queue.is_empty() {
-                        p.queue.push_back(m);
+                        p.queue.push_back((m, 1, Vec::new()));
                     }
                 }
             }
@@ -498,6 +501,89 @@ impl Kernel {
             }
             // vm_protect / mach_vm_protect
             3803 | 4802 => r(KERN_SUCCESS),
+            // mach_vm_remap(target, &addr, size, mask, flags, src_task,
+            // src_addr, copy, &cur, &max, inherit). Each process has its own
+            // memory here, so the pages are copied either way.
+            4813 => {
+                let (addr, size, mask, flags, src_addr) = (arg(0), arg(1), arg(2), arg(3), arg(4));
+                let src_pid = self
+                    .ipc
+                    .ports
+                    .get(&le(msg, 28))
+                    .and_then(|p| match p.kobject {
+                        Some(KObject::Task(pid)) => Some(pid),
+                        _ => None,
+                    });
+                let Some(src_pid) = src_pid else {
+                    return r(KERN_INVALID_ARGUMENT);
+                };
+                if matches!(obj, KObject::Task(t) if t != self.pid) {
+                    // Only remapping into the calling task is supported.
+                    return r(KERN_INVALID_ARGUMENT);
+                }
+                let offset = src_addr % super::vm::PAGE;
+                let base = src_addr - offset;
+                let end = base as u64 + ((offset as u64 + size as u64 + 0xfff) & !0xfff);
+                if size == 0 || end > 1 << 32 {
+                    return r(KERN_INVALID_ARGUMENT);
+                }
+                let len = (end - base as u64) as u32;
+                // Every source page has to be mapped.
+                let src_vm = if src_pid == self.pid {
+                    &self.vm
+                } else {
+                    match self.parked.get(&src_pid) {
+                        Some(p) => &p.vm,
+                        None => return r(KERN_INVALID_ARGUMENT),
+                    }
+                };
+                let mut at = base as u64;
+                while at < end {
+                    match src_vm.region_at(at as u32) {
+                        Some((b, region)) => at = b as u64 + region.size as u64,
+                        None => return r(KERN_INVALID_ADDRESS),
+                    }
+                }
+                let bytes = match self.mem_for(src_pid) {
+                    Some(mem) => read_bytes(mem, base, len),
+                    None => return r(KERN_INVALID_ARGUMENT),
+                };
+                match self.vm_allocate(addr, len, mask, flags, "vm_remap") {
+                    Some(a) => {
+                        write_bytes(&mut self.mem, a, &bytes);
+                        Some(reply(msg, &[KERN_SUCCESS, a + offset, 3, 7], &[]))
+                    }
+                    None => r(KERN_NO_SPACE),
+                }
+            }
+            // vm_region / mach_vm_region(task, addr, flavor, count). On
+            // 32-bit ARM mach_vm addresses are 32-bit too.
+            3800 | 4816 => {
+                let addr = arg(0);
+                let count = arg(2).min(10);
+                let pid = match obj {
+                    KObject::Task(pid) => pid,
+                    _ => self.pid,
+                };
+                let vm = if pid == self.pid {
+                    &self.vm
+                } else {
+                    match self.parked.get(&pid) {
+                        Some(p) => &p.vm,
+                        None => return r(KERN_INVALID_ARGUMENT),
+                    }
+                };
+                let Some((base, region)) = vm.region_from(addr) else {
+                    return r(KERN_INVALID_ADDRESS);
+                };
+                // protection, max_protection, inheritance (copy), the rest 0.
+                let mut info = vec![region.prot.0, 7, 1];
+                info.resize(count as usize, 0);
+                let mut words = vec![base, region.size];
+                words.push(count);
+                words.extend(info);
+                Some(reply(msg, &words, &[(0, MACH_MSG_TYPE_PORT_SEND)]))
+            }
             // host_info, host_statistics, task_info, thread_info: zeros
             200 | 219 | 3405 | 3612 => {
                 let count = arg(1);
@@ -596,8 +682,12 @@ impl Kernel {
             data[12..16].copy_from_slice(&remote.to_le_bytes());
             let reply_bits = (bits >> 8) & 0xff;
             data[0..4].copy_from_slice(
-                &((bits & !0xffff) | (reply_bits & 0xff) | ((bits & 0xff) << 8)).to_le_bytes(),
+                &((bits & !0xffff)
+                    | received_disposition(reply_bits)
+                    | (received_disposition(bits & 0xff) << 8))
+                    .to_le_bytes(),
             );
+            translate_descriptors(&mut data);
             if self.trace {
                 echo!(
                     "xnu:   mach_msg send id {} to {remote:#x} reply {local:#x}",
@@ -618,23 +708,26 @@ impl Kernel {
                 if let Some(rep) = self.kernel_msg(obj, &read_bytes(&self.mem, msg, send_size)) {
                     if local != 0 {
                         if let Some(p) = self.ipc.ports.get_mut(&local) {
-                            p.queue.push_back(rep);
+                            p.queue.push_back((rep, self.pid, Vec::new()));
                         }
                     }
                 }
             } else if remote == self.ipc.bootstrap_port {
                 if let Some(rep) = super::mach::bootstrap_msg(self, &data) {
                     if let Some(p) = self.ipc.ports.get_mut(&local) {
-                        p.queue.push_back(rep);
+                        p.queue.push_back((rep, self.pid, Vec::new()));
                     }
                 }
             } else {
+                let ool = ool_descriptors(&data)
+                    .map(|(_, addr, size)| read_bytes(&self.mem, addr, size))
+                    .collect();
                 self.ipc
                     .ports
                     .get_mut(&remote)
                     .unwrap()
                     .queue
-                    .push_back(data);
+                    .push_back((data, self.pid, ool));
             }
         }
         if option & MACH_RCV_MSG != 0 {
@@ -687,17 +780,37 @@ impl Kernel {
         };
         for n in candidates {
             let p = self.ipc.ports.get_mut(&n).unwrap();
-            if let Some(m) = p.queue.front() {
+            if let Some((m, _, _)) = p.queue.front() {
                 if m.len() as u32 + trailer_size > rcv_size {
                     return Some(MACH_RCV_TOO_LARGE);
                 }
-                let m = p.queue.pop_front().unwrap();
+                let (mut m, sender, ool) = p.queue.pop_front().unwrap();
+                if sender != self.pid {
+                    // Another task's memory: give the receiver its own copy.
+                    let offsets: Vec<usize> = ool_descriptors(&m).map(|(o, _, _)| o).collect();
+                    for (o, bytes) in offsets.into_iter().zip(ool) {
+                        let addr = if bytes.is_empty() {
+                            0
+                        } else {
+                            let size = super::vm::round_up(bytes.len() as u32);
+                            let Some(addr) =
+                                self.vm
+                                    .map_anywhere(0, size, 0, Prot::RW, "mach_msg ool".into())
+                            else {
+                                return Some(MACH_RCV_TOO_LARGE);
+                            };
+                            write_bytes(&mut self.mem, addr, &bytes);
+                            addr
+                        };
+                        m[o..o + 4].copy_from_slice(&addr.to_le_bytes());
+                    }
+                }
                 write_bytes(&mut self.mem, msg, &m);
                 let mut trailer = vec![0u8; trailer_size as usize];
                 trailer[4..8].copy_from_slice(&trailer_size.to_le_bytes());
                 if trailer_size >= 52 {
                     // audit_token_t starts at offset 20; word 5 is the PID
-                    trailer[40..44].copy_from_slice(&1u32.to_le_bytes());
+                    trailer[40..44].copy_from_slice(&sender.to_le_bytes());
                 }
                 write_bytes(&mut self.mem, msg + m.len() as u32, &trailer);
                 // msgh_local_port of the received message is the port it came
@@ -712,6 +825,64 @@ impl Kernel {
 
 /// The bootstrap port (launchd's job server). There is a single task, so
 /// services registered or checked in are simply looked up by name.
+const MACH_MSG_TYPE_PORT_SEND_ONCE_RCV: u32 = 18;
+
+/// The right a receiver holds for a port right sent with `disposition`.
+fn received_disposition(disposition: u32) -> u32 {
+    match disposition {
+        19 | 20 => MACH_MSG_TYPE_PORT_SEND,     // COPY_SEND, MAKE_SEND
+        21 => MACH_MSG_TYPE_PORT_SEND_ONCE_RCV, // MAKE_SEND_ONCE
+        d => d,
+    }
+}
+
+/// Rewrites the dispositions of a complex message's port descriptors to the
+/// rights the receiver gets, which MIG clients check.
+fn translate_descriptors(m: &mut [u8]) {
+    if m.len() < 28 || le(m, 0) & 0x80000000 == 0 {
+        return;
+    }
+    for i in 0..le(m, 24) as usize {
+        let o = 28 + i * 12;
+        if o + 12 > m.len() {
+            return;
+        }
+        let at = match m[o + 11] {
+            0 => o + 10, // MACH_MSG_PORT_DESCRIPTOR
+            2 => o + 10, // MACH_MSG_OOL_PORTS_DESCRIPTOR
+            _ => continue,
+        };
+        m[at] = received_disposition(m[at].into()) as u8;
+    }
+}
+
+/// The out-of-line memory and port array descriptors of a complex message:
+/// each one's offset in the message, address and size in bytes.
+fn ool_descriptors(m: &[u8]) -> impl Iterator<Item = (usize, u32, u32)> + '_ {
+    const MACH_MSG_OOL_DESCRIPTOR: u32 = 1;
+    const MACH_MSG_OOL_PORTS_DESCRIPTOR: u32 = 2;
+    const MACH_MSG_OOL_VOLATILE_DESCRIPTOR: u32 = 3;
+    let count = if m.len() >= 28 && le(m, 0) & 0x80000000 != 0 {
+        le(m, 24) as usize
+    } else {
+        0
+    };
+    (0..count).filter_map(move |i| {
+        let o = 28 + i * 12;
+        if o + 12 > m.len() {
+            return None;
+        }
+        // address, size (or port count), then flags with the type on top.
+        match le(m, o + 8) >> 24 {
+            MACH_MSG_OOL_DESCRIPTOR | MACH_MSG_OOL_VOLATILE_DESCRIPTOR => {
+                Some((o, le(m, o), le(m, o + 4)))
+            }
+            MACH_MSG_OOL_PORTS_DESCRIPTOR => Some((o, le(m, o), le(m, o + 4).saturating_mul(4))),
+            _ => None,
+        }
+    })
+}
+
 pub fn bootstrap_msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
     const BOOTSTRAP_UNKNOWN_SERVICE: u32 = 1102;
     const MACH_MSG_TYPE_PORT_RECEIVE: u32 = 16;
@@ -753,11 +924,15 @@ pub fn bootstrap_msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
             Some(reply(msg, &[KERN_SUCCESS], &[]))
         }
         // bootstrap_look_up
-        404 => match k.ipc.services.get(&name) {
-            Some(&port) => {
+        404 => match k.ipc.services.get(&name).copied() {
+            Some(port) => {
                 if k.trace {
                     log!("xnu: bootstrap_look_up({name:?}) = {port:#x}");
                 }
+                Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_SEND)]))
+            }
+            None if k.start_on_demand(&name).is_some() => {
+                let port = k.ipc.services[&name];
                 Some(reply(msg, &[], &[(port, MACH_MSG_TYPE_PORT_SEND)]))
             }
             None => {
@@ -800,7 +975,31 @@ pub fn trap(k: &mut Kernel, num: u32) -> Option<u32> {
         26 => Some(k.ipc.new_port()),          // mach_reply_port
         27 => Some(k.threads[k.current].port), // thread_self_trap
         28 => Some(k.ipc.task_port),           // task_self_trap
-        29 => Some(k.ipc.host_port),           // host_self_trap
+        // task_name_for_pid, task_for_pid(target_tport, pid, *t)
+        44 | 45 => match k.task_port_for(k.arg(1)) {
+            Some(port) => {
+                let out = k.arg(2);
+                write_u32(&mut k.mem, out, port);
+                Some(KERN_SUCCESS)
+            }
+            None => Some(5 /* KERN_FAILURE */),
+        },
+        // pid_for_task(t, *pid)
+        46 => {
+            let pid = k.ipc.ports.get(&k.arg(0)).and_then(|p| match p.kobject {
+                Some(KObject::Task(pid)) => Some(pid),
+                _ => None,
+            });
+            match pid {
+                Some(pid) => {
+                    let out = k.arg(1);
+                    write_u32(&mut k.mem, out, pid);
+                    Some(KERN_SUCCESS)
+                }
+                None => Some(5 /* KERN_FAILURE */),
+            }
+        }
+        29 => Some(k.ipc.host_port), // host_self_trap
         31 => k.mach_msg(),
         // semaphore_signal, semaphore_signal_all, semaphore_signal_thread
         33..=35 => {

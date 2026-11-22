@@ -220,6 +220,26 @@ type Bytes = [u8; WINDOW_SIZE];
 #[cfg(target_os = "emscripten")]
 const WINDOW_TOP_RESERVED: VAddr = 16 * 1024 * 1024;
 
+#[cfg(target_os = "emscripten")]
+thread_local! {
+    /// Windows of dropped [Mem]s. WebAssembly memory never shrinks and a freed
+    /// window can't always be reallocated in place, so they are reused instead.
+    static SPARE_WINDOWS: std::cell::RefCell<Vec<*mut u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Clears a reused window, writing only to pages that aren't already zero so
+/// untouched pages stay uncommitted.
+#[cfg(target_os = "emscripten")]
+fn zero_dirty_pages(ptr: *mut u8, size: usize) {
+    let words = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u64>(), size / 8) };
+    for page in words.chunks_mut(PAGE_SIZE as usize / 8) {
+        if page.iter().any(|&w| w != 0) {
+            page.fill(0);
+        }
+    }
+}
+
 /// Index into [Bytes] for a guest address.
 #[inline(always)]
 fn host_index(addr: VAddr) -> usize {
@@ -281,6 +301,12 @@ pub struct Mem {
 
 impl Drop for Mem {
     fn drop(&mut self) {
+        #[cfg(target_os = "emscripten")]
+        {
+            SPARE_WINDOWS.with_borrow_mut(|w| w.push(self.bytes.cast()));
+            return;
+        }
+        #[allow(unreachable_code)]
         unsafe {
             crate::mem::host::free_memory(self.bytes.cast(), std::mem::size_of::<Bytes>()).unwrap();
         }
@@ -305,7 +331,16 @@ impl Mem {
     pub fn new() -> Mem {
         let size = std::mem::size_of::<Bytes>();
 
+        #[cfg(not(target_os = "emscripten"))]
         let ptr = unsafe { crate::mem::host::allocate_memory(size).unwrap() };
+        #[cfg(target_os = "emscripten")]
+        let ptr = match SPARE_WINDOWS.with_borrow_mut(|w| w.pop()) {
+            Some(ptr) => {
+                zero_dirty_pages(ptr, size);
+                ptr.cast()
+            }
+            None => unsafe { crate::mem::host::allocate_memory(size).unwrap() },
+        };
 
         assert_eq!(
             ptr as usize & PAGE_SIZE_ALIGN_MASK as usize,

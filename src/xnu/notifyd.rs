@@ -109,9 +109,16 @@ fn bump(k: &mut Kernel, name: &str) {
         data[o..o + 4].copy_from_slice(&value.to_le_bytes());
         value
     };
-    for m in &k.vfs.shm_maps {
-        if Rc::ptr_eq(&m.shm, shm) && slot * 4 + 4 <= m.len {
-            write_u32(&mut k.mem, m.addr + slot * 4, value);
+    let maps: Vec<(u32, u32)> = k
+        .vfs
+        .shm_maps
+        .iter()
+        .filter(|m| Rc::ptr_eq(&m.shm, shm) && slot * 4 + 4 <= m.len)
+        .map(|m| (m.pid, m.addr))
+        .collect();
+    for (pid, addr) in maps {
+        if let Some(mem) = k.mem_for(pid) {
+            write_u32(mem, addr + slot * 4, value);
         }
     }
 }
@@ -170,7 +177,7 @@ pub fn msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
                     for w in [0x12, 24, port, 0, 0, client_token] {
                         m.extend(u32::to_le_bytes(w));
                     }
-                    p.queue.push_back(m);
+                    p.queue.push_back((m, 1, Vec::new()));
                 }
             }
             vec![KERN_SUCCESS, NOTIFY_STATUS_OK]

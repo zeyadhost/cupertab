@@ -439,7 +439,7 @@ impl Kernel {
                 match self.pick_thread() {
                     Some(idx) => self.switch_to(idx),
                     None => {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        crate::sleep(std::time::Duration::from_millis(1));
                         continue;
                     }
                 }

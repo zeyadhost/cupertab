@@ -1359,6 +1359,18 @@ impl Window {
                 gles11::TEXTURE_MAG_FILTER,
                 gles11::LINEAR as _,
             );
+            // WebGL 1 samples non-power-of-two textures as black unless they
+            // clamp to the edge.
+            for wrap in [gles11::TEXTURE_WRAP_S, gles11::TEXTURE_WRAP_T] {
+                gl_ctx.TexParameteri(gles11::TEXTURE_2D, wrap, gles11::CLAMP_TO_EDGE as _);
+            }
+            // Show the texture as is. Modulating by the current color goes
+            // black on WebGL, where gl4es never uploads the initial color.
+            gl_ctx.TexEnvi(
+                gles11::TEXTURE_ENV,
+                gles11::TEXTURE_ENV_MODE,
+                gles11::REPLACE as _,
+            );
 
             present_frame(
                 gl_ctx.as_mut(),
@@ -1367,6 +1379,11 @@ impl Window {
                 /* virtual_cursor_visible_at: */ None,
             );
 
+            gl_ctx.TexEnvi(
+                gles11::TEXTURE_ENV,
+                gles11::TEXTURE_ENV_MODE,
+                gles11::MODULATE as _,
+            );
             gl_ctx.DeleteTextures(1, &texture);
         };
 

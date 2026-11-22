@@ -520,7 +520,7 @@ impl Vfs {
             FileKind::Host(file) => {
                 let m = file.metadata().map_err(|_| EBADF)?;
                 Ok(Stat {
-                    mode: 0o100644,
+                    mode: Self::host_file_mode(&m),
                     ino: 0x10000000,
                     size: m.len(),
                     uid: 501,

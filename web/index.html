@@ -24,11 +24,15 @@
 <body>
 <h1>touchHLE in the browser</h1>
 <p>An experimental WebAssembly build of <a href="https://touchhle.org/">touchHLE</a>, the
-high-level emulator for iPhone OS 2.x&ndash;4.0 apps. Pick an <code>.ipa</code> you own; it stays
-on your machine and runs entirely in this tab.</p>
+high-level emulator for iPhone OS 2.x&ndash;4.0 apps. Pick an <code>.ipa</code> you own, or an
+iPhone OS 4 <code>.ipsw</code> to boot Apple's own SpringBoard from it. Files stay on your machine
+and run entirely in this tab.</p>
 <div id="picker">
   <label class="button disabled" id="pick-label">Loading&hellip;
     <input type="file" id="ipa" accept=".ipa,.zip" hidden disabled>
+  </label>
+  <label class="button disabled" id="ipsw-label">Loading&hellip;
+    <input type="file" id="ipsw" accept=".ipsw" hidden disabled>
   </label>
 </div>
 <div id="status"></div>
@@ -39,6 +43,8 @@ on your machine and runs entirely in this tab.</p>
   const statusEl = document.getElementById('status');
   const input = document.getElementById('ipa');
   const label = document.getElementById('pick-label');
+  const ipswInput = document.getElementById('ipsw');
+  const ipswLabel = document.getElementById('ipsw-label');
   function log(text) {
     logEl.textContent += text + '\n';
     if (logEl.textContent.length > 200000) logEl.textContent = logEl.textContent.slice(-100000);
@@ -54,6 +60,9 @@ on your machine and runs entirely in this tab.</p>
       label.firstChild.textContent = 'Choose .ipa';
       label.classList.remove('disabled');
       input.disabled = false;
+      ipswLabel.firstChild.textContent = 'Boot iOS 4 .ipsw';
+      ipswLabel.classList.remove('disabled');
+      ipswInput.disabled = false;
     },
     onAbort(what) { stopped('touchHLE crashed: ' + what); },
   };
@@ -64,7 +73,9 @@ on your machine and runs entirely in this tab.</p>
     hasStopped = true;
     statusEl.textContent = message + ' (details in the log below)';
     input.disabled = true;
-    label.firstChild.textContent = 'Load another .ipa';
+    ipswInput.disabled = true;
+    ipswLabel.classList.add('disabled');
+    label.firstChild.textContent = 'Load another file';
     label.classList.remove('disabled');
     label.addEventListener('click', (e) => { e.preventDefault(); location.reload(); });
   }
@@ -75,23 +86,31 @@ on your machine and runs entirely in this tab.</p>
   window.addEventListener('unhandledrejection', (e) => {
     stopped('touchHLE crashed: ' + (e.reason && e.reason.message || e.reason));
   });
-  input.addEventListener('change', async () => {
-    const file = input.files[0];
-    if (!file) return;
+  async function launch(file, dir, args) {
     input.disabled = true;
+    ipswInput.disabled = true;
     label.classList.add('disabled');
+    ipswLabel.classList.add('disabled');
     statusEl.textContent = 'Loading ' + file.name + '…';
     const data = new Uint8Array(await file.arrayBuffer());
-    const name = file.name.replace(/[^A-Za-z0-9._-]/g, '_');
-    try { Module.FS.mkdir('/touchHLE_apps'); } catch (e) {}
-    Module.FS.writeFile('/touchHLE_apps/' + name, data);
+    const path = dir + '/' + file.name.replace(/[^A-Za-z0-9._-]/g, '_');
+    try { Module.FS.mkdir(dir); } catch (e) {}
+    Module.FS.writeFile(path, data);
     statusEl.textContent = 'Running ' + file.name;
     Module.canvas.style.display = 'block';
     Module.canvas.focus();
     try {
-      Module.callMain(['/touchHLE_apps/' + name]);
+      Module.callMain(args(path));
     } catch (e) {
       if (e !== 'unwind') { stopped('touchHLE stopped: ' + e); throw e; }
+    }
+  }
+  input.addEventListener('change', () => {
+    if (input.files[0]) launch(input.files[0], '/touchHLE_apps', (path) => [path]);
+  });
+  ipswInput.addEventListener('change', () => {
+    if (ipswInput.files[0]) {
+      launch(ipswInput.files[0], '/touchHLE_ipsw', (path) => ['--boot-firmware=' + path]);
     }
   });
 </script>

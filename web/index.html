@@ -116,7 +116,16 @@ and run entirely in this tab.</p>
     const path = dir + '/' + file.name.replace(/[^A-Za-z0-9._-]/g, '_');
     try { Module.FS.mkdir(dir); } catch (e) {}
     Module.FS.writeFile(path, data);
-    statusEl.textContent = 'Running ' + file.name;
+    const booting = dir === '/touchHLE_ipsw';
+    statusEl.textContent = booting
+      ? 'Booting ' + file.name + '. The screen stays black for a minute or two while SpringBoard starts.'
+      : 'Running ' + file.name;
+    if (booting) {
+      window.touchHLEDisplay = (on) => {
+        if (hasStopped) return;
+        statusEl.textContent = on ? 'Running ' + file.name : 'Screen off. Tap it or press Home to wake it.';
+      };
+    }
     Module.canvas.style.display = 'block';
     Module.canvas.focus();
     if (dir === '/touchHLE_ipsw') homeButton.style.display = 'block';

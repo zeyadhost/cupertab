@@ -142,7 +142,9 @@ impl Registry {
             lcd_owner: None,
             mbx_command_buffer: 0,
             mbx_handles: Default::default(),
-            next_mbx_handle: 1,
+            // MBX2D keeps mapping handles and surface IDs in one table, so
+            // handles start far above any surface ID.
+            next_mbx_handle: 0x10000,
             notify_ports: Default::default(),
             vsyncs: Default::default(),
             hid_queues: Default::default(),

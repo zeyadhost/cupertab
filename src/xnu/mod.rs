@@ -122,6 +122,8 @@ pub struct Kernel {
     /// Host time the emulator was not scheduled for (a hidden browser tab, a
     /// suspended process), which the guest's clock skips.
     stalled: std::time::Duration,
+    /// Whether the LCD showed a surface at the last frame, for the web page.
+    display_on: bool,
     last_tick: std::time::Instant,
     /// The latest `now_ns()`, so a stall noticed late never rewinds the clock.
     last_now: std::cell::Cell<u64>,
@@ -179,6 +181,7 @@ impl Kernel {
             current: 0,
             start: std::time::Instant::now(),
             stalled: std::time::Duration::ZERO,
+            display_on: false,
             last_tick: std::time::Instant::now(),
             last_now: std::cell::Cell::new(0),
             exit_status: None,
@@ -627,6 +630,23 @@ impl Kernel {
     /// events.
     fn present(&mut self) {
         self.last_present = std::time::Instant::now();
+        let on = self.iokit.presented_surface != 0;
+        if on != self.display_on {
+            self.display_on = on;
+            // The page says when the screen is still booting or has gone dark.
+            #[cfg(target_os = "emscripten")]
+            {
+                extern "C" {
+                    fn emscripten_run_script(script: *const std::ffi::c_char);
+                }
+                let script = if on {
+                    c"globalThis.touchHLEDisplay?.(true)"
+                } else {
+                    c"globalThis.touchHLEDisplay?.(false)"
+                };
+                unsafe { emscripten_run_script(script.as_ptr()) };
+            }
+        }
         let Some(window) = self.window.as_mut() else {
             return;
         };

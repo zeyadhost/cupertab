@@ -4,12 +4,14 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 //! Portable ARMv6 interpreter, used where the dynarmic JIT is unavailable
-//! (notably WebAssembly).
+//! (notably WebAssembly, where it also backs the Wasm JIT).
 //!
 //! Covers the ARM and Thumb-1 instruction sets, the ARMv6 media extensions
 //! and VFPv2 (scalar only).
 
 mod arm;
+#[cfg(target_os = "emscripten")]
+mod jit;
 mod thumb;
 mod vfp;
 
@@ -50,6 +52,7 @@ pub enum Exit {
 
 type Res = Result<(), Exit>;
 
+#[cfg_attr(target_os = "emscripten", repr(C))]
 pub struct Interp {
     pub regs: [u32; 16],
     pub ext: [u32; 64],
@@ -68,6 +71,8 @@ pub struct Interp {
     exclusive: bool,
     /// User read-only thread ID register (TPIDRURO).
     pub tls: u32,
+    #[cfg(target_os = "emscripten")]
+    jit: jit::Cache,
 }
 
 impl Interp {
@@ -87,6 +92,8 @@ impl Interp {
             branched: false,
             exclusive: false,
             tls: 0,
+            #[cfg(target_os = "emscripten")]
+            jit: jit::Cache::new(),
         }
     }
 
@@ -127,7 +134,23 @@ impl Interp {
             Some(ticks) => {
                 let mut remaining = *ticks;
                 let mut result = None;
+                #[cfg(target_os = "emscripten")]
+                let mut block_entry = true;
                 while remaining > 0 {
+                    // Profile branch targets and sample long straight-line
+                    // sequences instead of hashing each interpreted PC.
+                    #[cfg(target_os = "emscripten")]
+                    if self.jit.enabled()
+                        && (block_entry || self.branched || self.regs[15] & jit::SAMPLE_MASK == 0)
+                    {
+                        block_entry = false;
+                        let count = self.run_jit(mem, remaining);
+                        if count != 0 {
+                            block_entry = true;
+                            remaining -= u64::from(count);
+                            continue;
+                        }
+                    }
                     remaining -= 1;
                     if let Err(e) = self.step(mem) {
                         result = Some(e);

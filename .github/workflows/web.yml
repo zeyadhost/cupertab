@@ -32,6 +32,13 @@ jobs:
           version: 7.0.0
       - name: Build
         run: web/build.sh
+      - name: Test Wasm JIT
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUNNER: node
+        run: |
+          cargo test --release --target wasm32-unknown-emscripten --no-default-features --lib \
+            --config 'target.wasm32-unknown-emscripten.rustflags=["-C","link-arg=vendor/gl4es/lib/libGL.a","-C","link-arg=-sINVOKE_RUN=1","-C","link-arg=-sEXIT_RUNTIME=1","-C","link-arg=-sINITIAL_MEMORY=128MB"]' \
+            cpu::interp::jit::tests
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web/dist

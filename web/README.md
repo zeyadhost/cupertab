@@ -7,11 +7,14 @@ When booting firmware, the browser saves the last extracted root filesystem
 image in local site storage. Select the same IPSW again to skip extraction.
 Clearing site data removes the cache.
 
+The browser compiles hot ARM and Thumb code to WebAssembly. Add `?jit=off` to
+the page URL to compare with the interpreter.
+
 ## How it differs from the native build
 
 | Part | Native | Web |
 | --- | --- | --- |
-| CPU | Dynarmic JIT | Rust interpreter (`src/cpu/interp`), ARMv6 slices preferred |
+| CPU | Dynarmic JIT | Wasm JIT with Rust interpreter fallback, ARMv6 slices preferred |
 | Guest memory | 4 GiB reservation | 1 GiB window; the top 16 MiB (main thread stack) folds into its end |
 | Coroutines | corosensei | Emscripten fibers (`src/coroutine.rs`), needs `-sASYNCIFY` |
 | OpenGL | GLES 1.1 or GL 2.1 compat | GL 2.1 from [gl4es](https://github.com/ptitSeb/gl4es) on WebGL 1, one gl4es state per touchHLE context |
@@ -38,6 +41,6 @@ Pages on every push to `trunk`.
 
 ## Known limitations
 
-- Expect it to be several times slower than native: there is no JIT, and Asyncify adds overhead.
+- The web build is slower than native: unsupported instructions use the interpreter, and Asyncify adds overhead.
 - Needs a browser that allows a WebAssembly memory of about 1.2 GiB (desktop Chrome, Firefox, Safari).
 - Only iPhone OS 2.x to iOS 4.0 apps, same as touchHLE itself. Many games have only been tested natively.

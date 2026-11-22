@@ -414,6 +414,16 @@ impl Mem {
         unsafe { &mut *self.bytes }
     }
 
+    #[cfg(target_os = "emscripten")]
+    pub(crate) const CPU_WINDOW_MASK: u32 = (WINDOW_SIZE - 1) as u32;
+
+    /// Borrow the same guest window used by cpu_read/cpu_write for one
+    /// translated block. No other access to it may run in the meantime.
+    #[cfg(target_os = "emscripten")]
+    pub(crate) fn cpu_window(&mut self) -> *mut u8 {
+        self.bytes.cast()
+    }
+
     // the performance characteristics of this hasn't been profiled, but it
     // seems like a good idea to help the compiler optimise for the fast path
     #[cold]

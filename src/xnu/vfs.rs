@@ -185,7 +185,7 @@ impl Vfs {
         canon == "/private/var" || canon.starts_with("/private/var/")
     }
 
-    fn host_path(&self, path: &str) -> PathBuf {
+    pub fn host_path(&self, path: &str) -> PathBuf {
         // Characters a host may treat as path syntax (e.g. "/C:/x" on
         // Windows) are escaped so no guest path can leave the overlay.
         let mut p = self.overlay.clone();

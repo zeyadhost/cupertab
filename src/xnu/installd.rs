@@ -215,6 +215,14 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
         if !rel.starts_with(&app) {
             continue;
         }
+        // enclosed_name allows inner "..", which would leave the bundle once
+        // the Payload prefix is stripped.
+        if rel
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(format!("bad path in the IPA: {}", rel.display()));
+        }
         let out = container.join(rel);
         if entry.is_dir() {
             std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;

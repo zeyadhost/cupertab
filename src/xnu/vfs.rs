@@ -374,6 +374,11 @@ impl Vfs {
                         EROFS
                     });
                 }
+                // A missing file is only made with O_CREAT, so a failed open
+                // must not leave its parent directories behind either.
+                if existing.is_none() && flags & O_CREAT == 0 {
+                    return Err(ENOENT);
+                }
                 // Copy up (or create) in the overlay.
                 let host = self.host_path(&canon);
                 if let Some(parent) = host.parent() {
@@ -384,7 +389,6 @@ impl Vfs {
                         std::fs::write(&host, fw.volume.read_all(n).map_err(|_| EACCES)?)
                             .map_err(|_| EACCES)?;
                     }
-                    None if flags & O_CREAT == 0 => return Err(ENOENT),
                     _ => (),
                 }
                 let mut opts = std::fs::OpenOptions::new();

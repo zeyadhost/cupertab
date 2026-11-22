@@ -11,6 +11,7 @@
 use super::bsd::Ret;
 use super::vm::Prot;
 use super::{read_bytes, read_u32, write_bytes, write_u32, Block, Kernel};
+use crate::mem::Ptr;
 use std::collections::{HashMap, VecDeque};
 
 pub const KERN_SUCCESS: u32 = 0;
@@ -671,9 +672,28 @@ impl Kernel {
         const MACH_RCV_MSG: u32 = 2;
         const MACH_RCV_TIMEOUT: u32 = 0x100;
         if option & MACH_SEND_MSG != 0 {
-            let mut data = read_bytes(&self.mem, msg, send_size);
+            let request = self
+                .mem
+                .bytes_at(Ptr::<u8, false>::from_bits(msg), send_size);
+            let (remote, local) = (le(request, 8), le(request, 12));
+            if self.trace {
+                echo!(
+                    "xnu:   mach_msg send id {} to {remote:#x} reply {local:#x}",
+                    le(request, 20)
+                );
+            }
+            let Some(port) = self.ipc.ports.get(&remote) else {
+                if self.trace {
+                    log!(
+                        "xnu: mach_msg to invalid port {remote:#x} (id {})",
+                        le(request, 20)
+                    );
+                    self.backtrace();
+                }
+                return Some(MACH_SEND_INVALID_DEST);
+            };
+            let mut data = request.to_vec();
             let bits = le(&data, 0);
-            let (remote, local) = (le(&data, 8), le(&data, 12));
             // MIG clients leave msgh_size to the kernel, which sets it from
             // the send size.
             data[4..8].copy_from_slice(&send_size.to_le_bytes());
@@ -688,22 +708,6 @@ impl Kernel {
                     .to_le_bytes(),
             );
             translate_descriptors(&mut data);
-            if self.trace {
-                echo!(
-                    "xnu:   mach_msg send id {} to {remote:#x} reply {local:#x}",
-                    le(&data, 20)
-                );
-            }
-            let Some(port) = self.ipc.ports.get(&remote) else {
-                log!(
-                    "xnu: mach_msg to invalid port {remote:#x} (id {})",
-                    le(&data, 20)
-                );
-                if self.trace {
-                    self.backtrace();
-                }
-                return Some(MACH_SEND_INVALID_DEST);
-            };
             if let Some(obj) = port.kobject.clone() {
                 if let Some(rep) = self.kernel_msg(obj, &read_bytes(&self.mem, msg, send_size)) {
                     if local != 0 {

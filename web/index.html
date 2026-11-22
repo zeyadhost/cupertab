@@ -115,6 +115,54 @@ entirely in this tab.</p>
   window.addEventListener('unhandledrejection', (e) => {
     stopped('touchHLE crashed: ' + (e.reason && e.reason.message || e.reason));
   });
+  const rootfsDir = '/touchHLE-web-rootfs-v1';
+  const rootfsPath = rootfsDir + '/rootfs.dmg';
+  const rootfsKey = new URL('rootfs-cache-v1', document.baseURI);
+  const rootfsDigestHeader = 'X-TouchHLE-IPSW-SHA256';
+  async function restoreRootfsCache(ipsw) {
+    try {
+      const cache = await caches.open('touchHLE-web-rootfs-v1');
+      const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', ipsw));
+      const digest = Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('');
+      const saved = await cache.match(rootfsKey);
+      if (saved?.headers.get(rootfsDigestHeader) === digest) {
+        const image = new Uint8Array(await saved.arrayBuffer());
+        Module.FS.mkdir(rootfsDir);
+        Module.FS.writeFile(rootfsPath, image, { canOwn: true });
+      }
+      return { cache, digest };
+    } catch (err) {
+      log('Root filesystem cache unavailable; booting without it.');
+      return null;
+    }
+  }
+  async function saveRootfsCache({ cache, digest }) {
+    const fs = Module.FS;
+    const size = fs.stat(rootfsPath).size;
+    let offset = 0;
+    // Stream large images without copying the whole file into one record.
+    const image = new ReadableStream({
+      pull(controller) {
+        if (offset === size) {
+          controller.close();
+          return;
+        }
+        const bytes = new Uint8Array(Math.min(size - offset, 4 * 1024 * 1024));
+        const file = fs.open(rootfsPath, 'r');
+        try {
+          const n = fs.read(file, bytes, 0, bytes.length, offset);
+          if (n !== bytes.length) throw new Error('Short root filesystem read');
+          offset += n;
+          controller.enqueue(bytes);
+        } finally {
+          fs.close(file);
+        }
+      }
+    });
+    await cache.put(rootfsKey, new Response(image, {
+      headers: { [rootfsDigestHeader]: digest }
+    }));
+  }
   async function launch(file, dir, args) {
     input.disabled = true;
     ipswInput.disabled = true;
@@ -126,10 +174,20 @@ entirely in this tab.</p>
     const data = new Uint8Array(await file.arrayBuffer());
     const path = dir + '/' + file.name.replace(/[^A-Za-z0-9._-]/g, '_');
     try { Module.FS.mkdir(dir); } catch (e) {}
-    Module.FS.writeFile(path, data);
+    Module.FS.writeFile(path, data, { canOwn: true });
     const booting = dir === '/touchHLE_ipsw';
+    if (booting) {
+      const persistent = await restoreRootfsCache(data);
+      window.touchHLEFirmwareReady = (extracted) => {
+        Module.FS.unlink(path);
+        statusEl.textContent = 'Starting SpringBoard…';
+        if (persistent && extracted) {
+          saveRootfsCache(persistent).catch(() => log('Could not save the root filesystem cache.'));
+        }
+      };
+    }
     statusEl.textContent = booting
-      ? 'Booting ' + file.name + '. The screen stays black for a minute or two while SpringBoard starts.'
+      ? 'Preparing firmware…'
       : 'Running ' + file.name;
     if (booting) {
       window.touchHLEDisplay = (on) => {

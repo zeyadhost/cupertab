@@ -8,13 +8,23 @@
 //! The catalog and extents-overflow B-trees are indexed in full when the
 //! volume is opened (an iPhone OS root filesystem has ~20k entries), which
 //! avoids needing HFS+ key comparison rules for lookups.
+//!
+//! Many files on the root filesystem are HFS+ compressed: their data fork is
+//! empty and the contents are in a `com.apple.decmpfs` extended attribute,
+//! either inline or as zlib chunks in the resource fork.
 
 use super::{be16, be32, be64, ReadAt};
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Read};
+use std::rc::Rc;
 
 pub const ROOT_FOLDER_ID: u32 = 2;
 const S_IFMT: u16 = 0o170000;
+const UF_COMPRESSED: u8 = 0x20;
+/// How many decompressed files are kept, so repeated small reads of one file
+/// don't decompress it again each time.
+const DECOMPRESSED_CACHE_SIZE: usize = 32;
 pub const S_IFDIR: u16 = 0o040000;
 pub const S_IFREG: u16 = 0o100000;
 pub const S_IFLNK: u16 = 0o120000;
@@ -43,6 +53,8 @@ pub struct Node {
     /// Hard link target (`iNode<n>`) for files that are hard links.
     link_inode: Option<u32>,
     pub data: Fork,
+    rsrc: Fork,
+    compressed: bool,
 }
 
 impl Node {
@@ -63,6 +75,9 @@ pub struct Volume<R: ReadAt> {
     children: HashMap<u32, Vec<u32>>,
     by_name: HashMap<(u32, String), u32>,
     private_dir: Option<u32>,
+    /// `com.apple.decmpfs` attributes of compressed files, by file ID.
+    decmpfs: HashMap<u32, Vec<u8>>,
+    decompressed: RefCell<Vec<(u32, Rc<Vec<u8>>)>>,
 }
 
 /// HFS+ dates are seconds since 1904; convert to the Unix epoch.
@@ -104,20 +119,31 @@ impl<R: ReadAt> Volume<R> {
             children: HashMap::new(),
             by_name: HashMap::new(),
             private_dir: None,
+            decmpfs: HashMap::new(),
+            decompressed: RefCell::default(),
         };
         let extents_file = parse_fork(&vh[0xc0..]);
         let mut catalog_file = parse_fork(&vh[0x110..]);
+        let attributes_file = parse_fork(&vh[0x160..]);
 
         let mut overflow: HashMap<u32, Vec<(u32, Vec<Extent>)>> = HashMap::new();
+        let mut rsrc_overflow: HashMap<u32, Vec<(u32, Vec<Extent>)>> = HashMap::new();
         vol.walk_btree(&extents_file, |key, rec| {
             // Key: keyLength, forkType, pad, fileID, startBlock
-            if key.len() < 12 || key[2] != 0 {
-                return; // resource fork extents are of no interest
+            if key.len() < 12 || rec.len() < 64 {
+                return;
             }
             let file_id = be32(&key[4..]);
             let start = be32(&key[8..]);
             let extents = parse_fork(&[&[0u8; 16][..], &rec[..64]].concat()).extents;
-            overflow.entry(file_id).or_default().push((start, extents));
+            match key[2] {
+                0 => overflow.entry(file_id).or_default().push((start, extents)),
+                0xff => rsrc_overflow
+                    .entry(file_id)
+                    .or_default()
+                    .push((start, extents)),
+                _ => (),
+            }
         })?;
 
         const CATALOG_FILE_ID: u32 = 4;
@@ -141,7 +167,7 @@ impl<R: ReadAt> Volume<R> {
             if kind != 1 && kind != 2 {
                 return; // thread records
             }
-            if rec.len() < 88 {
+            if rec.len() < 248 && kind == 2 || rec.len() < 88 {
                 catalog_err = Some("short catalog record".to_string());
                 return;
             }
@@ -157,6 +183,8 @@ impl<R: ReadAt> Volume<R> {
                 mtime: hfs_to_unix(be32(&rec[16..])),
                 link_inode: None,
                 data: Fork::default(),
+                rsrc: Fork::default(),
+                compressed: false,
             };
             if kind == 1 {
                 if mode & S_IFMT == 0 {
@@ -170,6 +198,8 @@ impl<R: ReadAt> Volume<R> {
                     mode |= S_IFREG | 0o644;
                 }
                 node.data = parse_fork(&rec[88..168]);
+                node.rsrc = parse_fork(&rec[168..248]);
+                node.compressed = rec[41] & UF_COMPRESSED != 0;
             }
             node.mode = mode;
             by_name.insert((parent, name), id);
@@ -191,6 +221,38 @@ impl<R: ReadAt> Volume<R> {
                     node.data.extents.extend(extents);
                 }
             }
+        }
+        for (file_id, mut records) in rsrc_overflow {
+            records.sort_by_key(|(start, _)| *start);
+            if let Some(node) = vol.nodes.get_mut(&file_id) {
+                for (_, extents) in records {
+                    node.rsrc.extents.extend(extents);
+                }
+            }
+        }
+
+        if attributes_file.size != 0 {
+            let mut decmpfs = HashMap::new();
+            vol.walk_btree(&attributes_file, |key, rec| {
+                // Key: keyLength, pad, fileID, startBlock, nameLength, name.
+                // Record: recordType, reserved, attrSize, data.
+                if key.len() < 14 || rec.len() < 16 || be32(rec) != 0x10 {
+                    return;
+                }
+                let name_len = be16(&key[12..]) as usize;
+                let Some(name) = key.get(14..14 + name_len * 2) else {
+                    return;
+                };
+                let name: Vec<u16> = name.chunks(2).map(be16).collect();
+                if String::from_utf16_lossy(&name) != "com.apple.decmpfs" {
+                    return;
+                }
+                let size = be32(&rec[12..]) as usize;
+                if let Some(data) = rec.get(16..16 + size) {
+                    decmpfs.insert(be32(&key[4..]), data.to_vec());
+                }
+            })?;
+            vol.decmpfs = decmpfs;
         }
         vol.private_dir = vol
             .by_name
@@ -298,11 +360,97 @@ impl<R: ReadAt> Volume<R> {
 
     pub fn read(&self, node: &Node, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         let node = self.resolve_hard_link(node);
-        self.read_fork(&node.data, buf, offset)
+        if !node.compressed {
+            return self.read_fork(&node.data, buf, offset);
+        }
+        let data = self.decompressed(node)?;
+        let start = offset.min(data.len() as u64) as usize;
+        let len = buf.len().min(data.len() - start);
+        buf[..len].copy_from_slice(&data[start..start + len]);
+        Ok(len)
     }
 
     pub fn size(&self, node: &Node) -> u64 {
-        self.resolve_hard_link(node).data.size
+        let node = self.resolve_hard_link(node);
+        if !node.compressed {
+            return node.data.size;
+        }
+        match self.decmpfs.get(&node.id) {
+            Some(x) if x.len() >= 16 => u64::from_le_bytes(x[8..16].try_into().unwrap()),
+            _ => 0,
+        }
+    }
+
+    /// The contents of a compressed file, from the cache if it was recently
+    /// read.
+    fn decompressed(&self, node: &Node) -> io::Result<Rc<Vec<u8>>> {
+        let mut cache = self.decompressed.borrow_mut();
+        if let Some(i) = cache.iter().position(|(id, _)| *id == node.id) {
+            let entry = cache.remove(i);
+            let data = entry.1.clone();
+            cache.push(entry);
+            return Ok(data);
+        }
+        let data = Rc::new(self.decompress(node)?);
+        if cache.len() == DECOMPRESSED_CACHE_SIZE {
+            cache.remove(0);
+        }
+        cache.push((node.id, data.clone()));
+        Ok(data)
+    }
+
+    fn decompress(&self, node: &Node) -> io::Result<Vec<u8>> {
+        let bad = |what: &str| io::Error::other(format!("HFS+ compressed file: {what}"));
+        let le32 = |b: &[u8], o: usize| -> io::Result<usize> {
+            b.get(o..o + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+                .ok_or_else(|| bad("truncated"))
+        };
+        let x = self
+            .decmpfs
+            .get(&node.id)
+            .ok_or_else(|| bad("no decmpfs"))?;
+        if x.len() < 16 || &x[..4] != b"fpmc" {
+            return Err(bad("bad decmpfs header"));
+        }
+        let size = self.size(node) as usize;
+        // A chunk starting with 0xff is stored, anything else is zlib.
+        let chunk = |c: &[u8], out: &mut Vec<u8>| -> io::Result<()> {
+            match c.first() {
+                Some(0xff) => out.extend_from_slice(&c[1..]),
+                Some(_) => {
+                    flate2::read::ZlibDecoder::new(c).read_to_end(out)?;
+                }
+                None => (),
+            }
+            Ok(())
+        };
+        let mut out = Vec::with_capacity(size);
+        match le32(x, 4)? {
+            // Inline in the attribute.
+            3 => chunk(&x[16..], &mut out)?,
+            // In the resource fork: a resource header whose first word is
+            // the data offset, then a data length, a chunk count and
+            // (offset, length) pairs relative to the chunk count.
+            4 => {
+                let mut rsrc = vec![0u8; node.rsrc.size as usize];
+                self.read_fork(&node.rsrc, &mut rsrc, 0)?;
+                let table = be32(rsrc.get(..4).ok_or_else(|| bad("truncated"))?) as usize + 4;
+                for i in 0..le32(&rsrc, table)? {
+                    let off = table + le32(&rsrc, table + 4 + i * 8)?;
+                    let len = le32(&rsrc, table + 8 + i * 8)?;
+                    chunk(
+                        rsrc.get(off..off + len).ok_or_else(|| bad("truncated"))?,
+                        &mut out,
+                    )?;
+                }
+            }
+            t => return Err(bad(&format!("unsupported type {t}"))),
+        }
+        if out.len() != size {
+            return Err(bad("wrong size"));
+        }
+        Ok(out)
     }
 
     pub fn read_all(&self, node: &Node) -> io::Result<Vec<u8>> {

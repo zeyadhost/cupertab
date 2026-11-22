@@ -194,6 +194,7 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
         .unwrap_or_default();
     let string = |key: &str| info.get(key).and_then(Value::as_string).map(str::to_string);
     let id = string("CFBundleIdentifier").unwrap_or_else(|| app.clone());
+    #[cfg(unix)]
     let executable = Path::new(&app).join(string("CFBundleExecutable").unwrap_or_default());
 
     // A stable container name per bundle identifier, so reinstalling an app

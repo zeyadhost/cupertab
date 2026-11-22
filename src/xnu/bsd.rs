@@ -184,6 +184,125 @@ impl Kernel {
         write_bytes(&mut self.mem, addr, &b);
     }
 
+    /// getattrlist(path, attrlist, buf, size, options), for the common, file
+    /// and directory attributes LaunchServices reads into its FSNodes.
+    /// Attributes are packed in bit order; the name is an attrreference_t
+    /// (offset from itself, length with the NUL) to data after them.
+    fn getattrlist(&mut self) -> Ret {
+        const VREG: u32 = 1;
+        const VDIR: u32 = 2;
+        const VLNK: u32 = 5;
+        // NAME, DEVID, FSID, OBJTYPE, OBJID, PAROBJID, the five times,
+        // FNDRINFO, OWNERID, GRPID and ACCESSMASK.
+        const COMMON: u32 =
+            0x1 | 0x2 | 0x4 | 0x8 | 0x20 | 0x80 | 0x3e00 | 0x4000 | 0x8000 | 0x10000 | 0x20000;
+        const DIR_ENTRYCOUNT: u32 = 0x4;
+        const FILE_DATALENGTH: u32 = 0x200;
+        const FILE_DATAALLOCSIZE: u32 = 0x400;
+        let path = self.path_arg(0);
+        let list = read_bytes(&self.mem, self.arg(1), 24);
+        let w = |i: usize| u32::from_le_bytes(list[4 + 4 * i..8 + 4 * i].try_into().unwrap());
+        let (common, vol, dir, file, fork) = (w(0), w(1), w(2), w(3), w(4));
+        if u16::from_le_bytes([list[0], list[1]]) != 5
+            || vol != 0
+            || fork != 0
+            || common & !COMMON != 0
+            || dir & !DIR_ENTRYCOUNT != 0
+            || file & !(FILE_DATALENGTH | FILE_DATAALLOCSIZE) != 0
+        {
+            log!("xnu: unsupported getattrlist {common:#x} {vol:#x} {dir:#x} {file:#x} {fork:#x}");
+            return Ret::Err(ENOTSUP);
+        }
+        let follow = self.arg(4) & 1 == 0;
+        let st = match self.vfs.stat(&self.fw, &path, follow) {
+            Ok(st) => st,
+            Err(e) => return Ret::Err(e),
+        };
+        let parent =
+            path.trim_end_matches('/')
+                .rsplit_once('/')
+                .map(|(p, _)| if p.is_empty() { "/" } else { p });
+        let parent_id = parent
+            .and_then(|p| self.vfs.stat(&self.fw, p, true).ok())
+            .map_or(1, |p| p.ino as u32);
+        let kind = match st.mode & 0o170000 {
+            0o040000 => VDIR,
+            0o120000 => VLNK,
+            _ => VREG,
+        };
+        let mut b = vec![0u8; 4];
+        let put = |b: &mut Vec<u8>, v: u32| b.extend(v.to_le_bytes());
+        let name_ref = (common & 0x1 != 0).then(|| {
+            b.extend([0u8; 8]);
+            4
+        });
+        if common & 0x2 != 0 {
+            put(&mut b, 0x1000003);
+        }
+        if common & 0x4 != 0 {
+            put(&mut b, 0x1000003);
+            put(&mut b, 0);
+        }
+        if common & 0x8 != 0 {
+            put(&mut b, kind);
+        }
+        if common & 0x20 != 0 {
+            put(&mut b, st.ino as u32);
+            put(&mut b, 0);
+        }
+        if common & 0x80 != 0 {
+            put(&mut b, parent_id);
+            put(&mut b, 0);
+        }
+        for bit in [0x200, 0x400, 0x800, 0x1000, 0x2000] {
+            if common & bit != 0 {
+                put(&mut b, st.mtime);
+                put(&mut b, 0);
+            }
+        }
+        if common & 0x4000 != 0 {
+            b.extend([0u8; 32]);
+        }
+        for (bit, v) in [
+            (0x8000, st.uid),
+            (0x10000, st.gid),
+            (0x20000, st.mode as u32 & 0o7777),
+        ] {
+            if common & bit != 0 {
+                put(&mut b, v);
+            }
+        }
+        if kind == VDIR && dir & DIR_ENTRYCOUNT != 0 {
+            let canon = self.vfs.canonical_dir(&self.fw, &path);
+            let entries = self.vfs.list_dir(&self.fw, &canon).len() as u32;
+            put(&mut b, entries.saturating_sub(2));
+        }
+        if kind != VDIR {
+            if file & FILE_DATALENGTH != 0 {
+                b.extend(st.size.to_le_bytes());
+            }
+            if file & FILE_DATAALLOCSIZE != 0 {
+                b.extend((st.size.div_ceil(4096) * 4096).to_le_bytes());
+            }
+        }
+        if let Some(at) = name_ref {
+            let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+            let name = if name.is_empty() { "/" } else { name };
+            let off = (b.len() - at) as u32;
+            b[at..at + 4].copy_from_slice(&off.to_le_bytes());
+            b[at + 4..at + 8].copy_from_slice(&(name.len() as u32 + 1).to_le_bytes());
+            b.extend(name.as_bytes());
+            b.push(0);
+            b.resize(b.len().next_multiple_of(4), 0);
+        }
+        let len = b.len();
+        b[..4].copy_from_slice(&(len as u32).to_le_bytes());
+        b.truncate(len.min(self.arg(3) as usize));
+        let out = self.arg(2);
+        write_bytes(&mut self.mem, out, &b);
+        ok(0)
+    }
+
     fn path_arg(&self, i: usize) -> String {
         let path = read_cstr(&self.mem, self.arg(i));
         if self.trace {
@@ -447,6 +566,39 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 _ => k.do_read(args[0], args[1], args[2], None),
             }
         }
+        // recvmsg(fd, msghdr, flags) and sendmsg(fd, msghdr, flags), and their
+        // $NOCANCEL variants, on Unix
+        // sockets, without control messages (no descriptor passing).
+        27 | 28 | 401 | 402 => {
+            let send = num == 28 || num == 402;
+            let hdr = args[1];
+            let iov = read_u32(&k.mem, hdr + 8);
+            let iovcnt = read_u32(&k.mem, hdr + 12).min(16);
+            let Some(FileKind::Socket(s)) = k.vfs.fds.get_mut(&args[0]).map(|f| &mut f.kind) else {
+                return Ret::Err(ENOTSOCK);
+            };
+            let mut total = 0;
+            for i in 0..iovcnt {
+                let base = read_u32(&k.mem, iov + 8 * i);
+                let len = read_u32(&k.mem, iov + 8 * i + 4);
+                if send {
+                    total += s.write(&read_bytes(&k.mem, base, len));
+                } else {
+                    let mut buf = vec![0u8; len as usize];
+                    let n = s.read(&mut buf);
+                    write_bytes(&mut k.mem, base, &buf[..n]);
+                    total += n;
+                    if n < buf.len() {
+                        break;
+                    }
+                }
+            }
+            if !send {
+                write_u32(&mut k.mem, hdr + 20, 0);
+                write_u32(&mut k.mem, hdr + 24, 0);
+            }
+            ok(total as u32)
+        }
         // socket(domain, type, protocol): only AF_UNIX
         97 if args[0] == 1 => ok(k.vfs.alloc_fd(OpenFile {
             kind: FileKind::Socket(Default::default()),
@@ -456,13 +608,17 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         })),
         97 => Ret::Err(EAFNOSUPPORT),
         // connect(fd, sockaddr_un, len)
-        98 => {
+        98 | 409 => {
             let path = read_cstr(&k.mem, args[1] + 2);
             let Some(FileKind::Socket(s)) = k.vfs.fds.get_mut(&args[0]).map(|f| &mut f.kind) else {
                 return Ret::Err(ENOTSOCK);
             };
-            if path == super::lockdown::LOCKDOWN_SOCKET {
-                s.service = Some(super::lockdown::Lockdownd::new(&k.fw.info));
+            use super::lockdown::{Lockdownd, Service, LAUNCHD_SOCKET, LOCKDOWN_SOCKET};
+            if path == LOCKDOWN_SOCKET {
+                s.service = Some(Service::Lockdownd(Lockdownd::new(&k.fw.info)));
+                ok(0)
+            } else if path.strip_prefix("/private").unwrap_or(&path) == LAUNCHD_SOCKET {
+                s.service = Some(Service::Launchd);
                 ok(0)
             } else {
                 log!("xnu: connect({path:?}): no such socket");
@@ -769,7 +925,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             Ret::Ok(new as u32, (new as u64 >> 32) as u32)
         }
         202 => k.sysctl(),
-        220 => Ret::Err(ENOTSUP), // getattrlist
+        220 => k.getattrlist(),
         294 => {
             // shared_region_check_np
             write_u32(&mut k.mem, args[0], super::SHARED_REGION_BASE);

@@ -139,6 +139,8 @@ pub fn handle_events(env: &mut Environment) -> Option<Instant> {
                 log!("Handling app-will-terminate event.");
                 ui_application::exit(env);
             }
+            // Apps have no Home button handling; the firmware boot does.
+            Event::HomeButton => {}
             Event::EnterDebugger => {
                 if env.is_debugging_enabled() {
                     log!("Handling EnterDebugger event: entering debugger.");

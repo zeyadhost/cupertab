@@ -11,6 +11,7 @@
 //! frameworks in Rust. Here, none of the guest code is reimplemented.
 
 mod bsd;
+mod installd;
 mod iokit;
 mod loader;
 pub mod lockdown;
@@ -397,11 +398,46 @@ impl Kernel {
         };
         let options = crate::options::Options::default();
         window.poll_for_events(&options);
+        let (width, height) = self
+            .iokit
+            .presented_surface
+            .checked_sub(1)
+            .and_then(|i| self.iokit.surfaces.get(i as usize))
+            .map_or((320, 480), |s| (s.width, s.height));
+        let mut touches = Vec::new();
+        let mut home = false;
         while let Some(event) = window.pop_event() {
-            if matches!(event, crate::window::Event::Quit) {
-                self.exit_status.get_or_insert(0);
+            use crate::window::Event;
+            use iokit::TouchPhase;
+            let (phase, map) = match event {
+                Event::Quit => {
+                    self.exit_status.get_or_insert(0);
+                    continue;
+                }
+                Event::TouchesDown(map) => (TouchPhase::Down, map),
+                Event::TouchesMove(map) => (TouchPhase::Move, map),
+                Event::TouchesUp(map) => (TouchPhase::Up, map),
+                Event::HomeButton => {
+                    home = true;
+                    continue;
+                }
+                _ => continue,
+            };
+            if let Some(&(x, y)) = map.values().next() {
+                touches.push((phase, (x / width as f32, y / height as f32)));
             }
         }
+        for (phase, pos) in touches {
+            self.hid_touch(phase, pos);
+        }
+        if home {
+            // The Home button is the Consumer page's Menu usage.
+            self.hid_button(0x0c, 0x40, true);
+            self.hid_button(0x0c, 0x40, false);
+        }
+        let Some(window) = self.window.as_mut() else {
+            return;
+        };
         let id = self.iokit.presented_surface;
         let Some(s) = id
             .checked_sub(1)

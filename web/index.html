@@ -16,6 +16,8 @@
   label.button.disabled { background: #444; cursor: default; }
   #canvas { background: #000; display: none; outline: none; }
   #status { color: #fc6; min-height: 1.5em; }
+  #home { display: none; background: #333; color: #fff; border: 0; padding: 10px 18px;
+          border-radius: 8px; cursor: pointer; }
   #log { width: min(900px, 100%); height: 220px; overflow: auto; background: #000; color: #9c9;
          font: 12px/1.4 ui-monospace, monospace; padding: 8px; box-sizing: border-box;
          white-space: pre-wrap; border-radius: 6px; }
@@ -37,9 +39,18 @@ and run entirely in this tab.</p>
 </div>
 <div id="status"></div>
 <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<button id="home" title="Home button (or the Home key)">Home</button>
 <pre id="log"></pre>
 <script>
   const logEl = document.getElementById('log');
+  const homeButton = document.getElementById('home');
+  // SDL reads the key from the event, so this presses the Home key.
+  homeButton.addEventListener('click', () => {
+    for (const type of ['keydown', 'keyup']) {
+      Module.canvas.dispatchEvent(new KeyboardEvent(type, { key: 'Home', code: 'Home', bubbles: true }));
+    }
+    Module.canvas.focus();
+  });
   const statusEl = document.getElementById('status');
   const input = document.getElementById('ipa');
   const label = document.getElementById('pick-label');
@@ -99,6 +110,7 @@ and run entirely in this tab.</p>
     statusEl.textContent = 'Running ' + file.name;
     Module.canvas.style.display = 'block';
     Module.canvas.focus();
+    if (dir === '/touchHLE_ipsw') homeButton.style.display = 'block';
     try {
       Module.callMain(args(path));
     } catch (e) {

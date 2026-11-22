@@ -18,6 +18,7 @@ pub const KERN_INVALID_ADDRESS: u32 = 1;
 pub const KERN_INVALID_ARGUMENT: u32 = 4;
 pub const KERN_NO_SPACE: u32 = 3;
 pub const KERN_INVALID_NAME: u32 = 15;
+pub const KERN_ALREADY_IN_SET: u32 = 11;
 pub const MACH_SEND_INVALID_DEST: u32 = 0x10000003;
 pub const MACH_RCV_TIMED_OUT: u32 = 0x10004003;
 pub const MACH_RCV_TOO_LARGE: u32 = 0x10004004;
@@ -46,14 +47,21 @@ pub enum KObject {
     IoConnect(usize),
     /// notifyd's `com.apple.system.notification_center` server.
     Notifyd,
+    /// installd's `com.apple.mobile.installd` server.
+    Installd,
+    /// A daemon that isn't emulated. Its requests fail at once: if the
+    /// lookup failed instead, clients such as AudioToolbox would retry it
+    /// with a sleep on the calling thread, stalling SpringBoard's event loop.
+    Unavailable,
 }
 
 #[derive(Debug, Default)]
 pub struct Port {
     pub kobject: Option<KObject>,
     pub queue: VecDeque<Vec<u8>>,
-    /// Port set this port belongs to.
-    pub set: Option<u32>,
+    /// Port sets this port belongs to. As in XNU, a port can be in several:
+    /// CFRunLoop adds each source's port to every mode's set.
+    pub sets: Vec<u32>,
     pub is_set: bool,
 }
 
@@ -88,6 +96,12 @@ impl Ipc {
         let notifyd = ipc.new_kernel_port(KObject::Notifyd);
         ipc.services
             .insert("com.apple.system.notification_center".to_string(), notifyd);
+        let installd = ipc.new_kernel_port(KObject::Installd);
+        ipc.services
+            .insert("com.apple.mobile.installd".to_string(), installd);
+        let mediaserverd = ipc.new_kernel_port(KObject::Unavailable);
+        ipc.services
+            .insert("com.apple.mediaserverd".to_string(), mediaserverd);
         ipc
     }
     pub fn new_port(&mut self) -> u32 {
@@ -263,6 +277,12 @@ impl Kernel {
         if matches!(obj, KObject::Notifyd) {
             return super::notifyd::msg(self, msg);
         }
+        if matches!(obj, KObject::Installd) {
+            return super::installd::msg(self, msg);
+        }
+        if matches!(obj, KObject::Unavailable) {
+            return r(MIG_BAD_ID);
+        }
         match id {
             // mach_port_allocate(task, right, &name)
             3204 => {
@@ -298,15 +318,29 @@ impl Kernel {
             4818 => Some(reply(msg, &[KERN_SUCCESS, 0], &[])),
             // mach_port_mod_refs(task, name, right, delta)
             3208 => r(KERN_SUCCESS),
-            // mach_port_move_member(task, member, after) and
-            // mach_port_insert_member(task, member, set). A port is in at most
-            // one set here.
-            3212 | 3226 => {
+            // mach_port_move_member(task, member, after): leaves every set
+            // for `after`, or for none if it is null.
+            3212 => {
                 let (member, set) = (arg(0), arg(1));
                 if let Some(p) = self.ipc.ports.get_mut(&member) {
-                    p.set = if set == 0 { None } else { Some(set) };
+                    p.sets.clear();
+                    if set != 0 {
+                        p.sets.push(set);
+                    }
                 }
                 r(KERN_SUCCESS)
+            }
+            // mach_port_insert_member(task, member, set)
+            3226 => {
+                let (member, set) = (arg(0), arg(1));
+                match self.ipc.ports.get_mut(&member) {
+                    Some(p) if p.sets.contains(&set) => r(KERN_ALREADY_IN_SET),
+                    Some(p) => {
+                        p.sets.push(set);
+                        r(KERN_SUCCESS)
+                    }
+                    None => r(KERN_INVALID_NAME),
+                }
             }
             // mach_port_request_notification: there is no previous port
             3213 => Some(reply(msg, &[], &[(0, MACH_MSG_TYPE_PORT_SEND_ONCE)])),
@@ -314,9 +348,7 @@ impl Kernel {
             3227 => {
                 let (member, set) = (arg(0), arg(1));
                 if let Some(p) = self.ipc.ports.get_mut(&member) {
-                    if p.set == Some(set) {
-                        p.set = None;
-                    }
+                    p.sets.retain(|&s| s != set);
                 }
                 r(KERN_SUCCESS)
             }
@@ -604,8 +636,8 @@ impl Kernel {
         }
         if option & MACH_RCV_MSG != 0 {
             if self.trace {
-                let set = self.ipc.ports.get(&rcv_name).and_then(|p| p.set);
-                log!("xnu:   mach_msg receive on {rcv_name:#x} (in set {set:x?})");
+                let sets = self.ipc.ports.get(&rcv_name).map(|p| p.sets.clone());
+                log!("xnu:   mach_msg receive on {rcv_name:#x} (in sets {sets:x?})");
             }
             if let Some(kr) = self.try_receive(msg, option, rcv_size, rcv_name) {
                 return Some(kr);
@@ -644,7 +676,7 @@ impl Kernel {
                 .ipc
                 .ports
                 .iter()
-                .filter(|(_, p)| p.set == Some(name))
+                .filter(|(_, p)| p.sets.contains(&name))
                 .map(|(&n, _)| n)
                 .collect(),
             Some(_) => vec![name],
@@ -730,6 +762,19 @@ pub fn bootstrap_msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
                 Some(reply(msg, &[BOOTSTRAP_UNKNOWN_SERVICE], &[]))
             }
         },
+        // vproc_mig_getsocket: the path of launchd's job socket, as a
+        // 128-byte string.
+        412 => {
+            let mut path = [0u8; 128];
+            let sock = super::lockdown::LAUNCHD_SOCKET.as_bytes();
+            path[..sock.len()].copy_from_slice(sock);
+            let mut body = vec![KERN_SUCCESS];
+            body.extend(
+                path.chunks(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().unwrap())),
+            );
+            Some(reply(msg, &body, &[]))
+        }
         // vproc_mig_swap_integer(inkey, outkey, inval): job tunables such as
         // the Jetsam priority. Nothing is stored; every key reads as 0.
         416 => Some(reply(msg, &[KERN_SUCCESS, 0, 0], &[])),

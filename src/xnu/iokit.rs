@@ -19,7 +19,18 @@ const MIG_BAD_ARGUMENTS: u32 = (-304i32) as u32;
 
 pub enum Prop {
     Data(Vec<u8>),
+    Number(u32),
+    Str(String),
+    Dict(Vec<(String, Prop)>),
 }
+
+/// The touchscreen's class. IOHIDLib's generic event service plugin drives
+/// it, so touches arrive as serialized `IOHIDEvent`s in a shared queue.
+pub const HID_DRIVER: &str = "IOHIDEventDriver";
+/// `kIOHIDServicePlugInTypeID`, which `IOHIDLib.plugin` provides.
+const HID_SERVICE_PLUGIN_TYPE: &str = "0516B563-B15B-11DA-96EB-0014519758EF";
+/// The size of each HID event queue, header included.
+const HID_QUEUE_SIZE: u32 = 0x4000;
 
 pub struct Entry {
     pub name: String,
@@ -37,6 +48,7 @@ impl Entry {
             || class == "IOService"
             || class == "IORegistryEntry"
             || (class == "IOMobileFramebuffer" && self.class.ends_with("CLCD"))
+            || (class == "IOHIDEventService" && self.class == HID_DRIVER)
     }
 }
 
@@ -48,10 +60,15 @@ pub struct Registry {
     pub presented_surface: u32,
     /// MBX2D's command buffer, allocated on first use.
     pub mbx_command_buffer: u32,
+    /// Surfaces mapped for MBX2D: the IOSurface ID by mapping handle.
+    pub mbx_handles: std::collections::HashMap<u32, u32>,
+    pub next_mbx_handle: u32,
     /// Async notification ports set on user clients, by connection port.
     pub notify_ports: std::collections::HashMap<u32, u32>,
     /// Enabled framebuffer vsync callbacks, by connection port.
     pub vsyncs: std::collections::HashMap<u32, VSync>,
+    /// Mapped HID event queues (`IODataQueueMemory`), by connection port.
+    pub hid_queues: std::collections::HashMap<u32, u32>,
 }
 
 /// A framebuffer vsync callback, sent at 60 Hz as an async completion.
@@ -77,7 +94,11 @@ impl VSync {
         let mut words = vec![0, 92, 0, self.port, 0, OS_NOTIFICATION_MESSAGE_ID];
         words.extend([4 + 6 * 4, ASYNC_COMPLETION_TYPE]);
         words.extend([self.port, self.callback, self.refcon, 0, 0, 0, 0, 0]);
-        words.extend([0, time as u32, (time >> 32) as u32, 0, 0, 0, 0]);
+        let frame = time / Self::PERIOD;
+        words.push(0);
+        for v in [time, time, frame] {
+            words.extend([v as u32, (v >> 32) as u32]);
+        }
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 }
@@ -114,8 +135,11 @@ impl Registry {
             surfaces: Vec::new(),
             presented_surface: 0,
             mbx_command_buffer: 0,
+            mbx_handles: Default::default(),
+            next_mbx_handle: 1,
             notify_ports: Default::default(),
             vsyncs: Default::default(),
+            hid_queues: Default::default(),
         };
         let root = r.add(
             None,
@@ -164,6 +188,25 @@ impl Registry {
             "IOService",
             vec![("name", strings(&["chosen"]))],
         );
+        r.add(
+            Some(root),
+            "multi-touch",
+            HID_DRIVER,
+            vec![
+                (
+                    "IOCFPlugInTypes",
+                    Prop::Dict(vec![(
+                        HID_SERVICE_PLUGIN_TYPE.into(),
+                        Prop::Str("IOHIDFamily.kext/PlugIns/IOHIDLib.plugin".into()),
+                    )]),
+                ),
+                // Digitizer, touch screen.
+                ("PrimaryUsagePage", Prop::Number(0x0d)),
+                ("PrimaryUsage", Prop::Number(0x04)),
+                ("Transport", Prop::Str("SPI".into())),
+            ],
+        );
+        r.add(Some(root), "AppleKeyStore", "AppleKeyStore", vec![]);
         r
     }
 
@@ -269,6 +312,16 @@ fn escape(s: &str) -> String {
 fn serialize(p: &Prop, out: &mut String) {
     match p {
         Prop::Data(d) => *out += &format!("<data>{}</data>", base64(d)),
+        Prop::Number(n) => *out += &format!("<integer size=\"32\">{n}</integer>"),
+        Prop::Str(v) => *out += &format!("<string>{}</string>", escape(v)),
+        Prop::Dict(items) => {
+            *out += "<dict>";
+            for (key, p) in items {
+                *out += &format!("<key>{}</key>", escape(key));
+                serialize(p, out);
+            }
+            *out += "</dict>";
+        }
     }
 }
 
@@ -385,6 +438,18 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
                 surface_method(k, selector, &scalars, inband)
             } else if class == "AppleMBXDevice" {
                 mbx_method(k, selector, &scalars)
+            } else if class == "AppleKeyStore" {
+                // Selectors 0 and 1 open and close the client. Selector 17 is
+                // the device lock state: no passcode is set
+                // (kMobileKeyBagDisabled), so SpringBoard unlocks on a slide.
+                match selector {
+                    0 | 1 => Some((Vec::new(), Vec::new())),
+                    17 => Some((vec![3], Vec::new())),
+                    _ => None,
+                }
+            } else if class == HID_DRIVER {
+                // Open (with options) and close; events come through the queue.
+                matches!(selector, 0 | 1).then(|| (Vec::new(), Vec::new()))
             } else {
                 None
             };
@@ -438,7 +503,28 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
         (2816, KObject::IoConnect(_)) => {
             k.iokit.notify_ports.remove(&le(msg, 8));
             k.iokit.vsyncs.remove(&le(msg, 8));
+            k.iokit.hid_queues.remove(&le(msg, 8));
             err(KERN_SUCCESS)
+        }
+        // io_connect_map_memory(connection, memory_type, into_task, address,
+        // size, flags): a complex request with the task port first. Only
+        // the touchscreen's event queue (type 0) can be mapped.
+        (2819, KObject::IoConnect(e))
+            if k.iokit.entries[e].class == HID_DRIVER && msg.len() >= 64 && le(msg, 48) == 0 =>
+        {
+            let conn = le(msg, 8);
+            let addr = match k.iokit.hid_queues.get(&conn) {
+                Some(&addr) => addr,
+                None => {
+                    let addr = k.vm_allocate(0, HID_QUEUE_SIZE, 0, 1, "IOHIDEventQueue")?;
+                    write_u32(&mut k.mem, addr, HID_QUEUE_SIZE - 12);
+                    write_u32(&mut k.mem, addr + 4, 0);
+                    write_u32(&mut k.mem, addr + 8, 0);
+                    k.iokit.hid_queues.insert(conn, addr);
+                    addr
+                }
+            };
+            Some(reply(msg, &[KERN_SUCCESS, addr, HID_QUEUE_SIZE], &[]))
         }
         // io_registry_get_root_entry(master)
         (2827, KObject::IoMaster) => port_reply(k.ipc.new_kernel_port(KObject::IoEntry(0))),
@@ -532,7 +618,7 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
             let max = le(msg, next) as usize;
             let mut bytes = match k.iokit.prop(e, &key) {
                 Some(Prop::Data(d)) => d.clone(),
-                None => return err(KIO_RETURN_NOT_FOUND),
+                _ => return err(KIO_RETURN_NOT_FOUND),
             };
             bytes.truncate(max);
             let mut body = vec![KERN_SUCCESS, bytes.len() as u32];
@@ -654,7 +740,9 @@ fn surface_info(id: u32, s: &Surface) -> Vec<u8> {
 /// 0 there before querying it with selector 2.
 ///
 /// Selector 2 with an IOSurface ID maps that surface for the GPU. The reply
-/// is a 20-byte struct: the handle MBX2D keys its surface table by, the
+/// is a 20-byte struct: the handle MBX2D keys its surface table and its
+/// packets by (new for every mapping, since MBX2D aborts on a handle it still
+/// holds, and a surface can be mapped more than once), the
 /// surface's address, and (fourth word) a pointer to a status word that
 /// MBX2D sets to 1.
 fn mbx_method(k: &mut Kernel, selector: u32, scalars: &[u64]) -> Option<(Vec<u64>, Vec<u8>)> {
@@ -689,14 +777,22 @@ fn mbx_method(k: &mut Kernel, selector: u32, scalars: &[u64]) -> Option<(Vec<u64
             (vec![header as u64], Vec::new())
         }
         // Unmap a surface.
-        (5, [_]) => (Vec::new(), Vec::new()),
+        (5, [handle]) => {
+            if let Ok(handle) = u32::try_from(*handle) {
+                k.iokit.mbx_handles.remove(&handle);
+            }
+            (Vec::new(), Vec::new())
+        }
         (2, [id, _]) => {
             let id = u32::try_from(*id).ok().filter(|&id| id != 0)?;
             let addr = k.iokit.surfaces.get(id as usize - 1)?.addr;
             // The status word lives in the surface's own spare page, after
             // the seed.
             let status = k.iokit.surfaces.get(id as usize - 1)?.seed_block + 0x10;
-            let words = [id, addr, 0, status, 0];
+            let handle = k.iokit.next_mbx_handle;
+            k.iokit.next_mbx_handle = handle.checked_add(1)?;
+            k.iokit.mbx_handles.insert(handle, id);
+            let words = [handle, addr, 0, status, 0];
             (
                 Vec::new(),
                 words.iter().flat_map(|w| w.to_le_bytes()).collect(),
@@ -719,7 +815,13 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
         if n == 0 || !n.is_multiple_of(4) || n > end - at - 4 {
             break;
         }
-        let w: Vec<u32> = (1..=n / 4).map(|i| read_u32(&k.mem, at + 4 * i)).collect();
+        let mut w: Vec<u32> = (1..=n / 4).map(|i| read_u32(&k.mem, at + 4 * i)).collect();
+        // Packets name surfaces by mapping handle.
+        for i in [4, 5] {
+            if let Some(h) = w.get_mut(i) {
+                *h = k.iokit.mbx_handles.get(h).copied().unwrap_or(0);
+            }
+        }
         if w.len() >= 15 && w[0] == 4 && w[11] & 0xff == 0xf0 {
             let corner = |v: u32| (v >> 16, v & 0xffff);
             mbx_fill(k, w[4], w[12], corner(w[13]), corner(w[14]));
@@ -736,7 +838,9 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
             let (c0, c1) = (corner(w[rop_at + 2]), corner(w[rop_at + 3]));
             mbx_copy(k, w[4], w[5], src_origin, c0, c1, blend);
         }
-        if w.len() >= 44 && w[0] == 9 {
+        // Textured quads: type 9, and type 8 with the same layout up to the
+        // modulation color.
+        if w.len() >= 44 && (w[0] == 8 || w[0] == 9) {
             mbx_draw_quad(k, &w);
         }
         at += 4 + n;
@@ -939,8 +1043,8 @@ fn surface_method(
         }
         // Wrap client memory (IOSurfaceClientWrapClientImage): width,
         // height, pixel format, bytes per element, bytes per row, size and
-        // address. Core Animation wraps every image it composites, often the
-        // same one again, so an identical wrap reuses its surface.
+        // address. Each wrap gets a new ID, as on the device: MBX2D keeps its
+        // own table by ID and aborts if an ID comes back while it holds it.
         8 if inband.len() >= 28 => {
             let w: Vec<u32> = inband.chunks(4).take(7).map(|c| le(c, 0)).collect();
             let [width, height, pixel_format, bytes_per_element, bytes_per_row, alloc_size, addr] =
@@ -956,32 +1060,18 @@ fn surface_method(
             {
                 return None;
             }
-            let existing = k.iokit.surfaces.iter().position(|s| {
-                (
-                    s.addr,
-                    s.width,
-                    s.height,
-                    s.bytes_per_row,
-                    s.bytes_per_element,
-                ) == (addr, width, height, bytes_per_row, bytes_per_element)
+            let seed_block = k.vm_allocate(0, 0x1000, 0, 1, "IOSurface seed")?;
+            k.iokit.surfaces.push(Surface {
+                addr,
+                alloc_size,
+                width,
+                height,
+                bytes_per_row,
+                bytes_per_element,
+                pixel_format,
+                seed_block,
             });
-            let index = match existing {
-                Some(i) => i,
-                None => {
-                    let seed_block = k.vm_allocate(0, 0x1000, 0, 1, "IOSurface seed")?;
-                    k.iokit.surfaces.push(Surface {
-                        addr,
-                        alloc_size,
-                        width,
-                        height,
-                        bytes_per_row,
-                        bytes_per_element,
-                        pixel_format,
-                        seed_block,
-                    });
-                    k.iokit.surfaces.len() - 1
-                }
-            };
+            let index = k.iokit.surfaces.len() - 1;
             let id = index as u32 + 1;
             (Vec::new(), surface_info(id, &k.iokit.surfaces[index]))
         }
@@ -997,5 +1087,162 @@ pub fn display_size(product_type: &str) -> (u32, u32) {
         (768, 1024)
     } else {
         (320, 480)
+    }
+}
+
+/// Touch phases the touchscreen reports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TouchPhase {
+    Down,
+    Move,
+    Up,
+}
+
+/// One serialized digitizer event, the layout `IOHIDEventCreateWithData`
+/// copies into an `IOHIDEvent`: size, type, options, the position, then the
+/// transducer fields and a quality orientation.
+fn digitizer_record(out: &mut Vec<u8>, transducer: u32, phase: TouchPhase, (x, y): (f32, f32)) {
+    const DIGITIZER_EVENT: u32 = 11;
+    const FINGER: u32 = 2;
+    // Range, touch, position and identity in the event mask.
+    let mask = match phase {
+        TouchPhase::Down => 0x1 | 0x2 | 0x20,
+        TouchPhase::Move => 0x4,
+        TouchPhase::Up => 0x1 | 0x2,
+    };
+    let touching = phase != TouchPhase::Up;
+    let fixed = |f: f32| (f * 65536.0) as i32 as u32;
+    let options = 1 | (touching as u32) << 16 | (touching as u32) << 17;
+    let (index, identity) = if transducer == FINGER { (1, 2) } else { (0, 0) };
+    let words = [
+        0x5c,
+        DIGITIZER_EVENT,
+        0,
+        0,
+        options,
+        fixed(x),
+        fixed(y),
+        0,
+        index,
+        transducer,
+        identity,
+        mask,
+        0,
+        touching as u32,
+        fixed(if touching { 1.0 } else { 0.0 }),
+        0,
+        0,
+        2, // quality orientation
+        fixed(1.0),
+        fixed(1.0),
+        0,
+        fixed(5.0),
+        fixed(5.0),
+    ];
+    out.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+}
+
+impl Kernel {
+    /// Reports a one-finger touch at `pos` (0 to 1 across the screen) to
+    /// every open touchscreen connection: a hand event with the finger as
+    /// its child, the way the multitouch driver reports it.
+    pub fn hid_touch(&mut self, phase: TouchPhase, pos: (f32, f32)) {
+        const HAND: u32 = 3;
+        const FINGER: u32 = 2;
+        let time = self.absolute_time();
+        let mut data = Vec::new();
+        for w in [time as u32, (time >> 32) as u32, 0, 0, 0, 2] {
+            data.extend(w.to_le_bytes());
+        }
+        digitizer_record(&mut data, HAND, phase, pos);
+        digitizer_record(&mut data, FINGER, phase, pos);
+        self.hid_post(&data);
+    }
+
+    /// Presses or releases a button, as a keyboard event (usage page and
+    /// usage). The home button is the consumer page's Menu usage.
+    pub fn hid_button(&mut self, usage_page: u16, usage: u16, down: bool) {
+        const KEYBOARD_EVENT: u32 = 3;
+        let time = self.absolute_time();
+        let mut data = Vec::new();
+        let words = [
+            time as u32,
+            (time >> 32) as u32,
+            0,
+            0,
+            0,
+            1,
+            0x1c,
+            KEYBOARD_EVENT,
+            0,
+            0,
+            1,
+            usage_page as u32 | (usage as u32) << 16,
+            down as u32,
+        ];
+        for w in words {
+            data.extend(w.to_le_bytes());
+        }
+        self.hid_post(&data);
+    }
+
+    fn hid_post(&mut self, data: &[u8]) {
+        let queues: Vec<(u32, u32)> = self
+            .iokit
+            .hid_queues
+            .iter()
+            .map(|(&c, &a)| (c, a))
+            .collect();
+        for (conn, addr) in queues {
+            if !self.hid_enqueue(addr, data) {
+                continue;
+            }
+            let Some(&port) = self.iokit.notify_ports.get(&conn) else {
+                continue;
+            };
+            // IODataQueue's data-available message: a bare header. One
+            // pending message is enough, since the client drains the queue.
+            let mut m = Vec::with_capacity(24);
+            for w in [0u32, 24, 0, port, 0, 0] {
+                m.extend(w.to_le_bytes());
+            }
+            if let Some(p) = self.ipc.ports.get_mut(&port) {
+                if p.queue.is_empty() {
+                    p.queue.push_back(m);
+                }
+            }
+        }
+    }
+
+    /// Appends an entry to an `IODataQueueMemory` (queue size, head, tail,
+    /// then entries of a size word and the data), wrapping like IODataQueue.
+    fn hid_enqueue(&mut self, addr: u32, data: &[u8]) -> bool {
+        let size = read_u32(&self.mem, addr);
+        let head = read_u32(&self.mem, addr + 4);
+        let tail = read_u32(&self.mem, addr + 8);
+        let entry = 4 + data.len() as u32;
+        if size > HID_QUEUE_SIZE - 12 || head > size || tail > size {
+            return false;
+        }
+        let at = if tail >= head {
+            if tail + entry <= size {
+                tail
+            } else if entry < head {
+                if tail + 4 <= size {
+                    write_u32(&mut self.mem, addr + 12 + tail, data.len() as u32);
+                }
+                0
+            } else {
+                return false;
+            }
+        } else if tail + entry < head {
+            tail
+        } else {
+            return false;
+        };
+        write_u32(&mut self.mem, addr + 12 + at, data.len() as u32);
+        write_bytes(&mut self.mem, addr + 16 + at, data);
+        write_u32(&mut self.mem, addr + 8, at + entry);
+        true
     }
 }

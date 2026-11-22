@@ -1379,6 +1379,11 @@ impl Window {
                 /* virtual_cursor_visible_at: */ None,
             );
 
+            gl_ctx.TexEnvi(
+                gles11::TEXTURE_ENV,
+                gles11::TEXTURE_ENV_MODE,
+                gles11::MODULATE as _,
+            );
             gl_ctx.DeleteTextures(1, &texture);
         };
 

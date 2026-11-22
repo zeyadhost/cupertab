@@ -20,5 +20,5 @@ rustflags = [
     "-C", "link-arg=-lidbfs.js",
     "-C", "link-arg=-sINVOKE_RUN=0",
     "-C", "link-arg=-sEXIT_RUNTIME=0",
-    "-C", "link-arg=-sEXPORTED_RUNTIME_METHODS=callMain,FS",
+    "-C", "link-arg=-sEXPORTED_RUNTIME_METHODS=callMain,FS,IDBFS",
 ]

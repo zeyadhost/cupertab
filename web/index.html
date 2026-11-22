@@ -121,7 +121,7 @@ entirely in this tab.</p>
     fs.mkdir(rootfsCache);
     let mounted = false;
     try {
-      fs.mount(fs.filesystems.IDBFS, {}, rootfsCache);
+      fs.mount(Module.IDBFS, {}, rootfsCache);
       mounted = true;
       await new Promise((resolve, reject) => {
         fs.syncfs(true, (err) => err ? reject(err) : resolve());

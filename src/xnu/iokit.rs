@@ -726,12 +726,84 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
         }
         // Copy, raster op 0xCC: source and destination surface IDs, the
         // source origin (x in bits 14-23, y below) and destination corners.
-        if w.len() >= 18 && w[0] == 5 && w[14] & 0xff == 0xcc {
+        // Packets with blend state (0x48 bytes) carry two more words before
+        // the raster op, whose bit 17 enables premultiplied source-over.
+        let rop_at = if w.get(1) == Some(&0x48) { 14 } else { 12 };
+        if w.len() >= rop_at + 4 && w[0] == 5 && w[rop_at] & 0xff == 0xcc {
             let corner = |v: u32| (v >> 16, v & 0xffff);
             let src_origin = ((w[10] >> 14) & 0x3ff, w[10] & 0x3fff);
-            mbx_copy(k, w[4], w[5], src_origin, corner(w[16]), corner(w[17]));
+            let blend = w[rop_at] & 0x20000 != 0;
+            let (c0, c1) = (corner(w[rop_at + 2]), corner(w[rop_at + 3]));
+            mbx_copy(k, w[4], w[5], src_origin, c0, c1, blend);
+        }
+        if w.len() >= 44 && w[0] == 9 {
+            mbx_draw_quad(k, &w);
         }
         at += 4 + n;
+    }
+}
+
+/// Textured quad, blended source-over (premultiplied) into the destination:
+/// source and destination surface IDs, the destination bounds, then four
+/// strip-ordered vertices and their texture coordinates, normalized to the
+/// texture's padded size, and an RGBA modulation color.
+fn mbx_draw_quad(k: &mut Kernel, w: &[u32]) {
+    let f = |i: usize| f32::from_bits(w[i]);
+    let surface = |id: u32| {
+        id.checked_sub(1)
+            .and_then(|i| k.iokit.surfaces.get(i as usize))
+            .filter(|s| s.bytes_per_element == 4)
+            .map(|s| (s.addr, s.bytes_per_row, s.width, s.height))
+    };
+    let (Some(src), Some(dst)) = (surface(w[4]), surface(w[5])) else {
+        return;
+    };
+    if src.2 == 0 || src.3 == 0 {
+        return;
+    }
+    let p = |i: usize| (f(21 + 2 * i), f(22 + 2 * i));
+    let t = |i: usize| (f(29 + 2 * i), f(30 + 2 * i));
+    let (p0, p1, p2) = (p(0), p(1), p(2));
+    let (e1, e2) = ((p1.0 - p0.0, p1.1 - p0.1), (p2.0 - p0.0, p2.1 - p0.1));
+    let det = e1.0 * e2.1 - e1.1 * e2.0;
+    if det == 0.0 || !det.is_finite() {
+        return;
+    }
+    let (t0, t1, t2) = (t(0), t(1), t(2));
+    let norm = ((src.1 / 4) as f32, src.3.next_power_of_two() as f32);
+    let color = [f(40), f(41), f(42), f(43)];
+    let clip = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
+    let (x0, y0) = (clip(f(6).min(f(8)), dst.2), clip(f(7).min(f(9)), dst.3));
+    let (x1, y1) = (clip(f(6).max(f(8)), dst.2), clip(f(7).max(f(9)), dst.3));
+    for y in y0..y1 {
+        let mut row = read_bytes(&k.mem, dst.0 + y * dst.1 + x0 * 4, (x1 - x0) * 4);
+        for (x, px) in (x0..x1).zip(row.chunks_mut(4)) {
+            let d = (x as f32 + 0.5 - p0.0, y as f32 + 0.5 - p0.1);
+            let a = (d.0 * e2.1 - d.1 * e2.0) / det;
+            let b = (e1.0 * d.1 - e1.1 * d.0) / det;
+            if !(0.0..=1.0).contains(&a) || !(0.0..=1.0).contains(&b) {
+                continue;
+            }
+            let u = t0.0 + a * (t1.0 - t0.0) + b * (t2.0 - t0.0);
+            let v = t0.1 + a * (t1.1 - t0.1) + b * (t2.1 - t0.1);
+            let tx = ((u * norm.0) as i64).clamp(0, src.2 as i64 - 1) as u32;
+            let ty = ((v * norm.1) as i64).clamp(0, src.3 as i64 - 1) as u32;
+            let s = read_u32(&k.mem, src.0 + ty * src.1 + tx * 4).to_le_bytes();
+            let alpha = s[3] as f32 / 255.0 * color[3];
+            // BGRA source, RGBA modulation color.
+            let c = [
+                s[0] as f32 * color[2],
+                s[1] as f32 * color[1],
+                s[2] as f32 * color[0],
+                s[3] as f32 * color[3],
+            ];
+            for i in 0..4 {
+                px[i] = (c[i] + px[i] as f32 * (1.0 - alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
+        }
+        write_bytes(&mut k.mem, dst.0 + y * dst.1 + x0 * 4, &row);
     }
 }
 
@@ -742,6 +814,7 @@ fn mbx_copy(
     (sx, sy): (u32, u32),
     (x0, y0): (u32, u32),
     (x1, y1): (u32, u32),
+    blend: bool,
 ) {
     let surface = |id: u32| {
         id.checked_sub(1)
@@ -767,8 +840,18 @@ fn mbx_copy(
             )
         })
         .collect();
-    for (y, row) in (y0..y1).zip(rows) {
-        write_bytes(&mut k.mem, dst.0 + y * dst.1 + x0 * 4, &row);
+    for (y, mut row) in (y0..y1).zip(rows) {
+        let at = dst.0 + y * dst.1 + x0 * 4;
+        if blend {
+            let under = read_bytes(&k.mem, at, row.len() as u32);
+            for (s, d) in row.chunks_mut(4).zip(under.chunks(4)) {
+                let inv = 255 - s[3] as u32;
+                for i in 0..4 {
+                    s[i] = (s[i] as u32 + (d[i] as u32 * inv + 127) / 255).min(255) as u8;
+                }
+            }
+        }
+        write_bytes(&mut k.mem, at, &row);
     }
 }
 

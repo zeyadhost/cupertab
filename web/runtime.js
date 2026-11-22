@@ -9,10 +9,13 @@ addToLibrary({
   touchhle_yield: () => {
     if (globalThis.scheduler?.yield &&
         document.visibilityState === 'visible' &&
-        performance.now() < Module['touchHLEFastUntil']) {
+        (Module['touchHLEFastStart'] || performance.now() < Module['touchHLEFastUntil'])) {
       return globalThis.scheduler.yield();
     }
     return new Promise((resolve) => setTimeout(resolve, 0));
+  },
+  touchhle_end_fast_start: () => {
+    Module['touchHLEFastStart'] = false;
   },
   touchhle_jit_enabled: () => Module['touchHLEJit'] !== false,
   touchhle_jit_compile__deps: ['$addFunction', '$wasmMemory'],

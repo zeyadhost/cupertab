@@ -8,13 +8,16 @@
 //! `MobileInstallationLookup`, so without it the home screen is empty.
 //!
 //! Requests and replies are one MIG routine, `migSendBlob`: a binary plist
-//! out of line, plus the client's reply port. Only the system apps in the
-//! firmware's /Applications are installed.
+//! out of line, plus the client's reply port. The system apps are the ones in
+//! the firmware's /Applications; user apps are the IPAs installed into
+//! /var/mobile/Applications on the data partition.
 
 use super::mach::le;
 use super::{write_bytes, Kernel};
 use crate::firmware::Firmware;
 use plist::{Dictionary, Value};
+use std::io::Read;
+use std::path::Path;
 
 const SEND_BLOB: u32 = 0xac7450;
 const MACH_MSG_TYPE_MOVE_SEND: u32 = 17;
@@ -37,11 +40,13 @@ pub fn msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
             .and_then(Value::as_dictionary)
             .and_then(|o| o.get("ApplicationType"))
             .and_then(Value::as_string);
-        let apps = if matches!(wanted, None | Some("System") | Some("Any")) {
-            system_apps(&k.fw)
-        } else {
-            Dictionary::new()
-        };
+        let mut apps = Dictionary::new();
+        if matches!(wanted, None | Some("System") | Some("Any")) {
+            apps.extend(system_apps(&k.fw));
+        }
+        if matches!(wanted, None | Some("User") | Some("Any")) {
+            apps.extend(user_apps(k));
+        }
         response.insert("LookupResult".into(), Value::Dictionary(apps));
     }
     response.insert("Status".into(), "Complete".into());
@@ -114,4 +119,165 @@ fn system_apps(fw: &Firmware) -> Dictionary {
         apps.insert(id, Value::Dictionary(info));
     }
     apps
+}
+
+/// The installed IPAs: each container in /var/mobile/Applications holds one
+/// app bundle.
+fn user_apps(k: &Kernel) -> Dictionary {
+    let mut apps = Dictionary::new();
+    let root = k.vfs.canonical(&k.fw, "/var/mobile/Applications");
+    let Ok(containers) = std::fs::read_dir(k.vfs.host_path(&root)) else {
+        return apps;
+    };
+    for container in containers.flatten() {
+        let Some(uuid) = container.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(container.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !name.ends_with(".app") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(entry.path().join("Info.plist")) else {
+                continue;
+            };
+            let Some(Value::Dictionary(mut info)) =
+                plist::Value::from_reader(std::io::Cursor::new(bytes)).ok()
+            else {
+                continue;
+            };
+            let Some(id) = info
+                .get("CFBundleIdentifier")
+                .and_then(Value::as_string)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let container = format!("{root}/{uuid}");
+            info.insert("Path".into(), format!("{container}/{name}").into());
+            info.insert("Container".into(), container.into());
+            info.insert("ApplicationType".into(), "User".into());
+            apps.insert(id, Value::Dictionary(info));
+        }
+    }
+    apps
+}
+
+/// Unpacks an IPA's `Payload/<name>.app` into a container in
+/// /var/mobile/Applications named after its bundle identifier, as installd
+/// would.
+/// Returns the bundle's name.
+pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
+    let file = std::fs::File::open(ipa).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let app = zip
+        .file_names()
+        .filter_map(|n| n.strip_prefix("Payload/")?.split('/').next())
+        .find(|a| a.ends_with(".app"))
+        .map(str::to_string)
+        .ok_or("no Payload/*.app in the IPA")?;
+
+    let id = zip
+        .by_name(&format!("Payload/{app}/Info.plist"))
+        .ok()
+        .and_then(|mut f| {
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).ok()?;
+            plist::Value::from_reader(std::io::Cursor::new(data)).ok()
+        })
+        .and_then(|v| {
+            v.as_dictionary()?
+                .get("CFBundleIdentifier")?
+                .as_string()
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| app.clone());
+
+    // A stable container name per bundle identifier, so reinstalling an app
+    // keeps its documents and different apps never share one.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    let a = h.finish();
+    (a, &id).hash(&mut h);
+    let b = h.finish();
+    let uuid = format!(
+        "{:08X}-{:04X}-{:04X}-{:04X}-{:012X}",
+        a >> 32,
+        (a >> 16) & 0xffff,
+        a & 0xffff,
+        b >> 48,
+        b & 0xffff_ffff_ffff
+    );
+    let container = k.vfs.host_path(
+        &k.vfs
+            .canonical(&k.fw, &format!("/var/mobile/Applications/{uuid}")),
+    );
+    for dir in ["Documents", "Library/Preferences", "Library/Caches", "tmp"] {
+        std::fs::create_dir_all(container.join(dir)).map_err(|e| e.to_string())?;
+    }
+    // Unpack beside the old bundle and swap it in only once every entry is
+    // out, so a bad IPA leaves the installed app as it was.
+    let staging = container.join(".installing");
+    let _ = std::fs::remove_dir_all(&staging);
+    let unpacked = (|| -> Result<(), String> {
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+            let Some(rel) = entry
+                .enclosed_name()
+                .and_then(|p| p.strip_prefix("Payload").ok())
+                .map(Path::to_path_buf)
+            else {
+                continue;
+            };
+            if !rel.starts_with(&app) {
+                continue;
+            }
+            // enclosed_name allows inner "..", which would leave the
+            // bundle once the Payload prefix is stripped.
+            if rel
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(format!("bad path in the IPA: {}", rel.display()));
+            }
+            let out = staging.join(rel);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
+            std::fs::write(&out, data).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = unpacked {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    // Renames are atomic, so an interruption leaves the old or the new
+    // bundle in place, never neither.
+    let bundle = container.join(&app);
+    let old = container.join(".replaced");
+    let _ = std::fs::remove_dir_all(&old);
+    if bundle.exists() {
+        std::fs::rename(&bundle, &old).map_err(|e| e.to_string())?;
+    }
+    let swapped = std::fs::rename(staging.join(&app), &bundle).map_err(|e| e.to_string());
+    if swapped.is_err() {
+        let _ = std::fs::rename(&old, &bundle);
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_dir_all(&old);
+    swapped?;
+    Ok(app)
 }

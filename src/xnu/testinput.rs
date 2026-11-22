@@ -42,6 +42,18 @@ pub fn parse() -> Vec<(u64, Action)> {
                 out.push((t, Action::Touch(TouchPhase::Down, (f(2), f(3)))));
                 out.push((t + 100_000_000, Action::Touch(TouchPhase::Up, (f(2), f(3)))));
             }
+            Some("page") => {
+                let n = 12;
+                for i in 0..=n {
+                    let x = 0.85 - 0.7 * i as f32 / n as f32;
+                    let phase = match i {
+                        0 => TouchPhase::Down,
+                        i if i == n => TouchPhase::Up,
+                        _ => TouchPhase::Move,
+                    };
+                    out.push((t + i as u64 * 20_000_000, Action::Touch(phase, (x, 0.45))));
+                }
+            }
             Some("swipe") => {
                 let n = 27;
                 for i in 0..=n {

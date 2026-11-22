@@ -27,14 +27,18 @@
 <h1>touchHLE in the browser</h1>
 <p>An experimental WebAssembly build of <a href="https://touchhle.org/">touchHLE</a>, the
 high-level emulator for iPhone OS 2.x&ndash;4.0 apps. Pick an <code>.ipa</code> you own, or an
-iPhone OS 4 <code>.ipsw</code> to boot Apple's own SpringBoard from it. Files stay on your machine
-and run entirely in this tab.</p>
+iPhone OS 4 <code>.ipsw</code> to boot Apple's own SpringBoard from it. To put apps on its home
+screen, add their <code>.ipa</code> files before booting. Files stay on your machine and run
+entirely in this tab.</p>
 <div id="picker">
   <label class="button disabled" id="pick-label">Loading&hellip;
     <input type="file" id="ipa" accept=".ipa,.zip" hidden disabled>
   </label>
   <label class="button disabled" id="ipsw-label">Loading&hellip;
     <input type="file" id="ipsw" accept=".ipsw" hidden disabled>
+  </label>
+  <label class="button disabled" id="install-label">Loading&hellip;
+    <input type="file" id="install" accept=".ipa,.zip" multiple hidden disabled>
   </label>
 </div>
 <div id="status"></div>
@@ -56,6 +60,8 @@ and run entirely in this tab.</p>
   const label = document.getElementById('pick-label');
   const ipswInput = document.getElementById('ipsw');
   const ipswLabel = document.getElementById('ipsw-label');
+  const installInput = document.getElementById('install');
+  const installLabel = document.getElementById('install-label');
   // Lines are batched into one DOM update per frame, since touchHLE can log
   // hundreds of lines a second and each update re-lays out the page.
   let pendingLog = '';
@@ -83,6 +89,9 @@ and run entirely in this tab.</p>
       ipswLabel.firstChild.textContent = 'Boot iOS 4 .ipsw';
       ipswLabel.classList.remove('disabled');
       ipswInput.disabled = false;
+      installLabel.firstChild.textContent = 'Add .ipa to home screen';
+      installLabel.classList.remove('disabled');
+      installInput.disabled = false;
     },
     onAbort(what) { stopped('touchHLE crashed: ' + what); },
   };
@@ -109,8 +118,10 @@ and run entirely in this tab.</p>
   async function launch(file, dir, args) {
     input.disabled = true;
     ipswInput.disabled = true;
+    installInput.disabled = true;
     label.classList.add('disabled');
     ipswLabel.classList.add('disabled');
+    installLabel.classList.add('disabled');
     statusEl.textContent = 'Loading ' + file.name + '…';
     const data = new Uint8Array(await file.arrayBuffer());
     const path = dir + '/' + file.name.replace(/[^A-Za-z0-9._-]/g, '_');
@@ -138,10 +149,23 @@ and run entirely in this tab.</p>
   input.addEventListener('change', () => {
     if (input.files[0]) launch(input.files[0], '/touchHLE_apps', (path) => [path]);
   });
-  ipswInput.addEventListener('change', () => {
-    if (ipswInput.files[0]) {
-      launch(ipswInput.files[0], '/touchHLE_ipsw', (path) => ['--boot-firmware=' + path]);
+  // IPAs picked before booting are installed onto SpringBoard's home screen.
+  installInput.addEventListener('change', () => {
+    const n = installInput.files.length;
+    installLabel.firstChild.textContent = n
+      ? n + (n === 1 ? ' app' : ' apps') + ' to install'
+      : 'Add .ipa to home screen';
+  });
+  ipswInput.addEventListener('change', async () => {
+    if (!ipswInput.files[0]) return;
+    const installs = [];
+    try { Module.FS.mkdir('/touchHLE_install'); } catch (e) {}
+    for (const ipa of installInput.files) {
+      const path = '/touchHLE_install/' + ipa.name.replace(/[^A-Za-z0-9._-]/g, '_');
+      Module.FS.writeFile(path, new Uint8Array(await ipa.arrayBuffer()));
+      installs.push('--install-ipa=' + path);
     }
+    launch(ipswInput.files[0], '/touchHLE_ipsw', (path) => ['--boot-firmware=' + path, ...installs]);
   });
 </script>
 <script src="touchHLE.data.js"></script>

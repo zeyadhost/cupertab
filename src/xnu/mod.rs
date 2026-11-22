@@ -24,7 +24,7 @@ mod vm;
 use crate::cpu::{Cpu, CpuContext, CpuState};
 use crate::firmware::Firmware;
 use crate::mem::{Mem, Ptr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use vm::{Prot, VmMap};
 
 /// Base of the dyld shared cache, where the kernel's shared region lives.
@@ -155,7 +155,8 @@ impl Kernel {
         if exe_path.ends_with("/SpringBoard") {
             argv.extend(["-SBNoWatchdogs".to_string(), "YES".to_string()]);
         }
-        let (mem, vm, cpu) = Self::load_image(&fw, exe_path, &argv, Vec::new())?;
+        let vfs = vfs::Vfs::new(overlay_dir);
+        let (mem, vm, cpu) = Self::load_image(&fw, &vfs, exe_path, &argv, Vec::new())?;
 
         let mut ipc = mach::Ipc::new();
         let thread_port = ipc.new_kernel_port(mach::KObject::Thread(0));
@@ -165,7 +166,7 @@ impl Kernel {
             cpu,
             vm,
             fw,
-            vfs: vfs::Vfs::new(overlay_dir),
+            vfs,
             iokit,
             ipc,
             threads: vec![Thread {
@@ -202,6 +203,7 @@ impl Kernel {
     /// the comm page into a fresh address space, with a CPU at dyld's entry.
     fn load_image(
         fw: &Firmware,
+        vfs: &vfs::Vfs,
         exe_path: &str,
         argv: &[String],
         env: Vec<String>,
@@ -209,7 +211,14 @@ impl Kernel {
         let mut mem = Mem::new();
         let mut vm = VmMap::new(0x1000, 0x2f000000);
 
-        let exe = Self::read_fw_file(fw, exe_path)?;
+        // Installed apps live on the data partition, in the overlay.
+        let exe = match vfs.resolve(fw, exe_path, true) {
+            Some(vfs::Resolved::Host(p)) => {
+                std::fs::read(p).map_err(|e| format!("{exe_path}: {e}"))?
+            }
+            _ => Self::read_fw_file(fw, exe_path)?,
+        };
+        let exe = thin_slice(exe)?;
         let main = loader::map_macho(&mut mem, &mut vm, &exe)?;
         let dylinker_path = main
             .dylinker
@@ -421,7 +430,7 @@ impl Kernel {
         argv: Vec<String>,
         env: Vec<String>,
     ) -> Result<(), String> {
-        let (mem, vm, cpu) = Self::load_image(&self.fw, exe_path, &argv, env)?;
+        let (mem, vm, cpu) = Self::load_image(&self.fw, &self.vfs, exe_path, &argv, env)?;
         let task_port = self.ipc.new_kernel_port(mach::KObject::Task(pid));
         let id = self.threads.len() as u32;
         let port = self.ipc.new_kernel_port(mach::KObject::Thread(id));
@@ -937,16 +946,62 @@ impl Kernel {
     }
 }
 
+/// The slice of a universal (fat) binary this ARMv6 device runs: armv6 if
+/// present, else the first ARM slice. Thin binaries are returned unchanged.
+fn thin_slice(exe: Vec<u8>) -> Result<Vec<u8>, String> {
+    const FAT_MAGIC: u32 = 0xcafe_babe;
+    const CPU_TYPE_ARM: u32 = 12;
+    const CPU_SUBTYPE_ARM_V6: u32 = 6;
+    let be = |at: usize| {
+        exe.get(at..at + 4)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+    };
+    if be(0) != Some(FAT_MAGIC) {
+        return Ok(exe);
+    }
+    let count = be(4).ok_or("truncated fat header")? as usize;
+    let mut chosen = None;
+    for i in 0..count.min(16) {
+        let at = 8 + 20 * i;
+        let (Some(cpu), Some(sub), Some(offset), Some(size)) =
+            (be(at), be(at + 4), be(at + 8), be(at + 12))
+        else {
+            return Err("truncated fat header".into());
+        };
+        if cpu != CPU_TYPE_ARM {
+            continue;
+        }
+        if chosen.is_none() || sub == CPU_SUBTYPE_ARM_V6 {
+            chosen = Some((offset as usize, size as usize));
+        }
+    }
+    let (offset, size) = chosen.ok_or("no ARM slice in the universal binary")?;
+    exe.get(offset..offset.checked_add(size).ok_or("bad fat slice")?)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| "fat slice out of range".to_string())
+}
+
 pub fn boot_firmware(
     ipsw_path: &Path,
     key: Option<&str>,
     exe_path: &str,
     headless: bool,
+    ipas: &[PathBuf],
 ) -> Result<(), String> {
     let base = crate::paths::user_data_base_path().join(crate::paths::FIRMWARE_DIR);
     let fw = Firmware::open(ipsw_path, &base, key)?;
     let overlay = base.join(format!("{}_{}_data", fw.info.product_type, fw.info.build));
     let mut kernel = Kernel::boot(fw, &overlay, exe_path, vec![exe_path.to_string()])?;
+    for ipa in ipas {
+        match installd::install_ipa(&kernel, ipa) {
+            Ok(app) => {
+                log!("xnu: installed {app}");
+            }
+            Err(e) => {
+                log!("xnu: couldn't install {}: {e}", ipa.display());
+            }
+        }
+    }
     if !headless {
         kernel.window = Some(Box::new(crate::window::Window::new(
             "touchHLE (iPhone OS firmware)",

@@ -158,6 +158,7 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     let mut firmware_info: Option<PathBuf> = None;
     let mut rootfs_key: Option<String> = None;
     let mut boot_firmware: Option<PathBuf> = None;
+    let mut install_ipas = Vec::new();
     let mut option_args = Vec::new();
     let mut options = options::Options::default();
     let mut app_args = None::<Vec<String>>;
@@ -180,6 +181,8 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             firmware_info = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--boot-firmware=") {
             boot_firmware = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--install-ipa=") {
+            install_ipas.push(PathBuf::from(path));
         } else if let Some(key) = arg.strip_prefix("--rootfs-key=") {
             rootfs_key = Some(key.to_string());
         // Parse an option and store a backup in option_args so that we can
@@ -201,7 +204,13 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             .as_ref()
             .and_then(|p| p.to_str())
             .unwrap_or("/System/Library/CoreServices/SpringBoard.app/SpringBoard");
-        return xnu::boot_firmware(&ipsw_path, rootfs_key.as_deref(), exe, options.headless);
+        return xnu::boot_firmware(
+            &ipsw_path,
+            rootfs_key.as_deref(),
+            exe,
+            options.headless,
+            &install_ipas,
+        );
     }
 
     if let Some(ipsw_path) = firmware_info {

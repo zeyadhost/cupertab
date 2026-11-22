@@ -452,6 +452,19 @@ impl Kernel {
         log!("xnu: pid {pid} exited with status {status}");
     }
 
+    /// Ends a parked process and frees its memory, as jetsam does.
+    fn kill_process(&mut self, pid: u32) {
+        if pid == self.pid {
+            return;
+        }
+        for t in self.threads.iter_mut().filter(|t| t.pid == pid) {
+            t.exited = true;
+        }
+        self.parked.remove(&pid);
+        lockdown::job_exited(pid, 9);
+        log!("xnu: killed pid {pid} to free memory");
+    }
+
     /// A process's memory, whether or not it is the running one.
     pub fn mem_for(&mut self, pid: u32) -> Option<&mut Mem> {
         if pid == self.pid {
@@ -473,6 +486,15 @@ impl Kernel {
     /// their Mach services first so clients can look them up right away.
     fn start_jobs(&mut self) {
         for job in lockdown::take_spawns() {
+            // Each process gets its own 1GiB memory window on the web, so
+            // only one app runs at a time there.
+            if cfg!(target_os = "emscripten") && job.label.starts_with("UIKitApplication:") {
+                for pid in lockdown::running_apps() {
+                    if pid != job.pid {
+                        self.kill_process(pid);
+                    }
+                }
+            }
             for name in job.mach_services {
                 let port = self.ipc.new_port();
                 self.ipc.services.insert(name, port);
@@ -661,9 +683,12 @@ impl Kernel {
         if s.bytes_per_element != 4 {
             return;
         }
-        let mem = match self.parked.get(&s.pid) {
-            Some(p) if s.pid != self.pid => &p.mem,
-            _ => &self.mem,
+        let mem = if s.pid == self.pid {
+            &self.mem
+        } else if let Some(p) = self.parked.get(&s.pid) {
+            &p.mem
+        } else {
+            return;
         };
         let mut pixels = Vec::with_capacity((s.width * s.height * 4) as usize);
         for y in 0..s.height {

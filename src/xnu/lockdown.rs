@@ -217,6 +217,17 @@ pub fn submit_job(label: &str) -> u32 {
     LAUNCHD.with_borrow_mut(|l| l.submit(label))
 }
 
+/// The PIDs of the apps SpringBoard launched that are still running.
+pub fn running_apps() -> Vec<u32> {
+    LAUNCHD.with_borrow(|l| {
+        l.jobs
+            .iter()
+            .filter(|j| j.exit.is_none() && j.label.starts_with("UIKitApplication:"))
+            .map(|j| j.pid)
+            .collect()
+    })
+}
+
 pub fn job_exited(pid: u32, status: i32) {
     LAUNCHD.with_borrow_mut(|l| {
         if let Some(job) = l.jobs.iter_mut().find(|j| j.pid == pid) {

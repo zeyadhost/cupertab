@@ -462,7 +462,11 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
                 None
             };
             let Some((scalar_out, inband_out)) = result else {
-                log!("xnu: {class} user client: unhandled selector {selector} {scalars:x?}");
+                log!(
+                    "xnu: {class} user client: unhandled selector {selector} {scalars:x?} \
+                     (inband {}, wants {scalar_out_max} scalars, {inband_out_max} bytes)",
+                    inband.len()
+                );
                 return err(KIO_RETURN_UNSUPPORTED);
             };
             let mut body = vec![KERN_SUCCESS, scalar_out_max.min(scalar_out.len()) as u32];
@@ -786,6 +790,41 @@ fn mbx_method(k: &mut Kernel, selector: u32, scalars: &[u64]) -> Option<(Vec<u64
             }
             (vec![header as u64], Vec::new())
         }
+        // A scratch surface MBX2D allocates for itself (format, width,
+        // height), e.g. to scale down a launch image. It is mapped like
+        // selector 2, with one more word in the reply.
+        (6, [_format, width, height]) => {
+            let width = u32::try_from(*width).ok().filter(|&w| w > 0 && w <= 4096)?;
+            let height = u32::try_from(*height)
+                .ok()
+                .filter(|&h| h > 0 && h <= 4096)?;
+            let bytes_per_row = (width * 4).next_multiple_of(16);
+            let alloc_size = bytes_per_row * height;
+            let pages = alloc_size.next_multiple_of(0x1000);
+            let addr = k.vm_allocate(0, pages + 0x1000, 0, 1, "MBX scratch surface")?;
+            k.iokit.surfaces.push(Surface {
+                pid: k.pid,
+                addr,
+                alloc_size,
+                width,
+                height,
+                bytes_per_row,
+                bytes_per_element: 4,
+                pixel_format: 0,
+                seed_block: addr + pages,
+            });
+            let id = k.iokit.surfaces.len() as u32;
+            let handle = k.iokit.next_mbx_handle;
+            k.iokit.next_mbx_handle = handle.checked_add(1)?;
+            k.iokit.mbx_handles.insert(handle, id);
+            let words = [handle, addr, 0, addr + pages + 0x10, 0, 0];
+            (
+                Vec::new(),
+                words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            )
+        }
+        // Wait for a mapped surface to go idle: drawing here is synchronous.
+        (10, [_handle]) => (Vec::new(), Vec::new()),
         // Unmap a surface.
         (5, [handle]) => {
             if let Ok(handle) = u32::try_from(*handle) {

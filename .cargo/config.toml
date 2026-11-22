@@ -17,6 +17,7 @@ rustflags = [
     "-C", "link-arg=-sFULL_ES2",
     "-C", "link-arg=-sGL_ENABLE_GET_PROC_ADDRESS",
     "-C", "link-arg=-sFORCE_FILESYSTEM",
+    "-C", "link-arg=-lidbfs.js",
     "-C", "link-arg=-sINVOKE_RUN=0",
     "-C", "link-arg=-sEXIT_RUNTIME=0",
     "-C", "link-arg=-sEXPORTED_RUNTIME_METHODS=callMain,FS",

@@ -10,8 +10,9 @@
 //! for example SpringBoard finds its `N82AP.plist` from `IODeviceTree:/`.
 
 use super::mach::{le, ool_reply, reply, KObject, KERN_SUCCESS, MACH_MSG_TYPE_PORT_SEND};
-use super::{read_bytes, read_u32, write_bytes, write_u32, Kernel, Mem};
+use super::{read_u32, write_bytes, write_u32, Kernel, Mem};
 use crate::firmware::IpswInfo;
+use crate::mem::Ptr;
 
 const KIO_RETURN_NOT_FOUND: u32 = 0xe00002f0;
 const KIO_RETURN_UNSUPPORTED: u32 = 0xe00002c7;
@@ -928,8 +929,14 @@ fn mbx_draw_quad(k: &mut Kernel, w: &[u32]) {
     let clip = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
     let (x0, y0) = (clip(f(6).min(f(8)), dst.2), clip(f(7).min(f(9)), dst.3));
     let (x1, y1) = (clip(f(6).max(f(8)), dst.2), clip(f(7).max(f(9)), dst.3));
+    if x0 == x1 || y0 == y1 {
+        return;
+    }
+    let row_bytes = (x1 - x0) * 4;
+    let mut row = vec![0; row_bytes as usize];
     for y in y0..y1 {
-        let mut row = read_bytes(&k.mem, dst.0 + y * dst.1 + x0 * 4, (x1 - x0) * 4);
+        let start = Ptr::from_bits(dst.0 + y * dst.1 + x0 * 4);
+        row.copy_from_slice(k.mem.bytes_at(start.cast_const(), row_bytes));
         for (x, px) in (x0..x1).zip(row.chunks_mut(4)) {
             let d = (x as f32 + 0.5 - p0.0, y as f32 + 0.5 - p0.1);
             let a = (d.0 * e2.1 - d.1 * e2.0) / det;
@@ -956,7 +963,7 @@ fn mbx_draw_quad(k: &mut Kernel, w: &[u32]) {
                     .clamp(0.0, 255.0) as u8;
             }
         }
-        write_bytes(&mut k.mem, dst.0 + y * dst.1 + x0 * 4, &row);
+        k.mem.bytes_at_mut(start, row_bytes).copy_from_slice(&row);
     }
 }
 
@@ -980,31 +987,34 @@ fn mbx_copy(
     };
     let x1 = x1.min(dst.2).min((x0 + src.2).saturating_sub(sx));
     let y1 = y1.min(dst.3).min((y0 + src.3).saturating_sub(sy));
-    if x0 >= x1 {
+    if x0 >= x1 || y0 >= y1 {
         return;
     }
     // Read the whole rectangle first, as it may overlap within one surface.
-    let rows: Vec<Vec<u8>> = (y0..y1)
-        .map(|y| {
-            read_bytes(
-                &k.mem,
-                src.0 + (sy + y - y0) * src.1 + sx * 4,
-                (x1 - x0) * 4,
-            )
-        })
-        .collect();
-    for (y, mut row) in (y0..y1).zip(rows) {
-        let at = dst.0 + y * dst.1 + x0 * 4;
+    let row_bytes = (x1 - x0) * 4;
+    let mut pixels = Vec::with_capacity(row_bytes as usize * (y1 - y0) as usize);
+    for y in y0..y1 {
+        let at = Ptr::<u8, false>::from_bits(src.0 + (sy + y - y0) * src.1 + sx * 4);
+        pixels.extend_from_slice(k.mem.bytes_at(at, row_bytes));
+    }
+    for (y, row) in (y0..y1).zip(pixels.chunks_exact(row_bytes as usize)) {
+        let at = Ptr::from_bits(dst.0 + y * dst.1 + x0 * 4);
+        let under = k.mem.bytes_at_mut(at, row_bytes);
         if blend {
-            let under = read_bytes(&k.mem, at, row.len() as u32);
-            for (s, d) in row.chunks_mut(4).zip(under.chunks(4)) {
+            for (s, d) in row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(under.as_chunks_mut::<4>().0)
+            {
                 let inv = 255 - s[3] as u32;
                 for i in 0..4 {
-                    s[i] = (s[i] as u32 + (d[i] as u32 * inv + 127) / 255).min(255) as u8;
+                    d[i] = (s[i] as u32 + (d[i] as u32 * inv + 127) / 255).min(255) as u8;
                 }
             }
+        } else {
+            under.copy_from_slice(row);
         }
-        write_bytes(&mut k.mem, at, &row);
     }
 }
 

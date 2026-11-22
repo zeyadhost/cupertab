@@ -115,6 +115,24 @@ entirely in this tab.</p>
   window.addEventListener('unhandledrejection', (e) => {
     stopped('touchHLE crashed: ' + (e.reason && e.reason.message || e.reason));
   });
+  const rootfsCache = '/touchHLE-web-rootfs-v1';
+  async function restoreRootfsCache() {
+    const fs = Module.FS;
+    fs.mkdir(rootfsCache);
+    let mounted = false;
+    try {
+      fs.mount(fs.filesystems.IDBFS, {}, rootfsCache);
+      mounted = true;
+      await new Promise((resolve, reject) => {
+        fs.syncfs(true, (err) => err ? reject(err) : resolve());
+      });
+      return true;
+    } catch (err) {
+      if (mounted) fs.unmount(rootfsCache);
+      log('Root filesystem cache unavailable; booting without it.');
+      return false;
+    }
+  }
   async function launch(file, dir, args) {
     input.disabled = true;
     ipswInput.disabled = true;
@@ -126,10 +144,22 @@ entirely in this tab.</p>
     const data = new Uint8Array(await file.arrayBuffer());
     const path = dir + '/' + file.name.replace(/[^A-Za-z0-9._-]/g, '_');
     try { Module.FS.mkdir(dir); } catch (e) {}
-    Module.FS.writeFile(path, data);
+    Module.FS.writeFile(path, data, { canOwn: true });
     const booting = dir === '/touchHLE_ipsw';
+    if (booting) {
+      const persistent = await restoreRootfsCache();
+      window.touchHLEFirmwareReady = () => {
+        Module.FS.unlink(path);
+        statusEl.textContent = 'Starting SpringBoard…';
+        if (persistent) {
+          Module.FS.syncfs(false, (err) => {
+            if (err) log('Could not save the root filesystem cache.');
+          });
+        }
+      };
+    }
     statusEl.textContent = booting
-      ? 'Booting ' + file.name + '. The screen stays black for a minute or two while SpringBoard starts.'
+      ? 'Preparing firmware…'
       : 'Running ' + file.name;
     if (booting) {
       window.touchHLEDisplay = (on) => {

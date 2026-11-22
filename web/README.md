@@ -3,6 +3,10 @@
 A WebAssembly build of touchHLE. Open the page, pick an `.ipa` you own, and it
 runs in the tab; nothing is uploaded anywhere.
 
+When booting firmware, the browser saves the last extracted root filesystem
+image in local site storage. Select the same IPSW again to skip extraction.
+Clearing site data removes the cache.
+
 ## How it differs from the native build
 
 | Part | Native | Web |

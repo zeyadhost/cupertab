@@ -19,6 +19,9 @@ use std::cell::RefCell;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "emscripten")]
+pub const WEB_ROOTFS_CACHE: &str = "/touchHLE-web-rootfs-v1";
+
 pub fn be16(b: &[u8]) -> u16 {
     u16::from_be_bytes(b[..2].try_into().unwrap())
 }
@@ -208,6 +211,14 @@ impl Firmware {
             .ok_or("Disk image has no HFS partition")?;
         let base = partition.first_sector * 512;
         let volume = hfs::Volume::new(Box::new(udif) as Box<dyn ReadAt>, base)?;
+        #[cfg(target_os = "emscripten")]
+        if cache_dir == Path::new(WEB_ROOTFS_CACHE) {
+            extern "C" {
+                fn emscripten_run_script(script: *const std::ffi::c_char);
+            }
+            unsafe { emscripten_run_script(c"globalThis.touchHLEFirmwareReady?.()".as_ptr()) };
+            crate::web_yield(true);
+        }
         Ok(Firmware { info, volume })
     }
 
@@ -216,23 +227,49 @@ impl Firmware {
         cache_dir: &Path,
         info: &IpswInfo,
     ) -> Result<PathBuf, String> {
-        let out_path = cache_dir.join(format!(
-            "{}_{}_{}",
-            info.product_type, info.build, info.rootfs_name
-        ));
         let file = std::fs::File::open(ipsw_path).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         let mut entry = zip
             .by_name(&info.rootfs_name)
             .map_err(|_| format!("IPSW has no {}", info.rootfs_name))?;
+        #[cfg(target_os = "emscripten")]
+        let out_path = cache_dir.join(format!("{:08x}-{}.dmg", entry.crc32(), entry.size()));
+        #[cfg(not(target_os = "emscripten"))]
+        let out_path = cache_dir.join(format!(
+            "{}_{}_{}",
+            info.product_type, info.build, info.rootfs_name
+        ));
         if std::fs::metadata(&out_path).is_ok_and(|m| m.len() == entry.size()) {
+            log!("Using cached root filesystem image");
             return Ok(out_path);
         }
         log!("Extracting root filesystem image to {}", out_path.display());
         std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "emscripten")]
+        if cache_dir == Path::new(WEB_ROOTFS_CACHE) {
+            // Keep one image; a different IPSW replaces it after validation.
+            for file in std::fs::read_dir(cache_dir).map_err(|e| e.to_string())? {
+                std::fs::remove_file(file.map_err(|e| e.to_string())?.path())
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         let tmp_path = out_path.with_extension("part");
         let mut out = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        #[cfg(not(target_os = "emscripten"))]
         io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "emscripten")]
+        {
+            use std::io::Write;
+            let mut buf = vec![0; 256 * 1024];
+            loop {
+                let n = entry.read(&mut buf).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                crate::web_yield(false);
+            }
+        }
         drop(out);
         std::fs::rename(&tmp_path, &out_path).map_err(|e| e.to_string())?;
         Ok(out_path)

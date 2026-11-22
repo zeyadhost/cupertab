@@ -53,7 +53,11 @@ pub fn write_u32(mem: &mut Mem, addr: u32, v: u32) {
     write_bytes(mem, addr, &v.to_le_bytes())
 }
 pub fn read_u32(mem: &Mem, addr: u32) -> u32 {
-    u32::from_le_bytes(read_bytes(mem, addr, 4).try_into().unwrap())
+    u32::from_le_bytes(
+        mem.bytes_at(Ptr::<u8, false>::from_bits(addr), 4)
+            .try_into()
+            .unwrap(),
+    )
 }
 pub fn read_cstr(mem: &Mem, addr: u32) -> String {
     let p: Ptr<u8, false> = Ptr::from_bits(addr);
@@ -737,8 +741,11 @@ impl Kernel {
         };
         let mut pixels = Vec::with_capacity((s.width * s.height * 4) as usize);
         for y in 0..s.height {
-            let row = read_bytes(mem, s.addr + y * s.bytes_per_row, s.width * 4);
-            for bgra in row.chunks(4) {
+            let row = mem.bytes_at(
+                Ptr::<u8, false>::from_bits(s.addr + y * s.bytes_per_row),
+                s.width * 4,
+            );
+            for bgra in row.as_chunks::<4>().0 {
                 pixels.extend([bgra[2], bgra[1], bgra[0], 255]);
             }
         }
@@ -989,7 +996,11 @@ pub fn boot_firmware(
     ipas: &[PathBuf],
 ) -> Result<(), String> {
     let base = crate::paths::user_data_base_path().join(crate::paths::FIRMWARE_DIR);
-    let fw = Firmware::open(ipsw_path, &base, key)?;
+    #[cfg(target_os = "emscripten")]
+    let cache = Path::new(crate::firmware::WEB_ROOTFS_CACHE);
+    #[cfg(not(target_os = "emscripten"))]
+    let cache = &base;
+    let fw = Firmware::open(ipsw_path, cache, key)?;
     let overlay = base.join(format!("{}_{}_data", fw.info.product_type, fw.info.build));
     let mut kernel = Kernel::boot(fw, &overlay, exe_path, vec![exe_path.to_string()])?;
     for ipa in ipas {

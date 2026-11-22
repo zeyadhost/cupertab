@@ -238,8 +238,8 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
             if !rel.starts_with(&app) {
                 continue;
             }
-            // enclosed_name allows inner "..", which would leave the bundle once
-            // the Payload prefix is stripped.
+            // enclosed_name allows inner "..", which would leave the
+            // bundle once the Payload prefix is stripped.
             if rel
                 .components()
                 .any(|c| !matches!(c, std::path::Component::Normal(_)))

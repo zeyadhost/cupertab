@@ -766,7 +766,7 @@ fn translate_descriptors(m: &mut [u8]) {
         }
         let at = match m[o + 11] {
             0 => o + 10, // MACH_MSG_PORT_DESCRIPTOR
-            2 => o + 6,  // MACH_MSG_OOL_PORTS_DESCRIPTOR
+            2 => o + 10, // MACH_MSG_OOL_PORTS_DESCRIPTOR
             _ => continue,
         };
         m[at] = received_disposition(m[at].into()) as u8;
@@ -789,11 +789,12 @@ fn ool_descriptors(m: &[u8]) -> impl Iterator<Item = (usize, u32, u32)> + '_ {
         if o + 12 > m.len() {
             return None;
         }
-        match le(m, o + 4) >> 24 {
+        // address, size (or port count), then flags with the type on top.
+        match le(m, o + 8) >> 24 {
             MACH_MSG_OOL_DESCRIPTOR | MACH_MSG_OOL_VOLATILE_DESCRIPTOR => {
-                Some((o, le(m, o), le(m, o + 8)))
+                Some((o, le(m, o), le(m, o + 4)))
             }
-            MACH_MSG_OOL_PORTS_DESCRIPTOR => Some((o, le(m, o), le(m, o + 8).saturating_mul(4))),
+            MACH_MSG_OOL_PORTS_DESCRIPTOR => Some((o, le(m, o), le(m, o + 4).saturating_mul(4))),
             _ => None,
         }
     })

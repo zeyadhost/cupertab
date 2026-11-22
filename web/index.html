@@ -79,6 +79,7 @@ entirely in this tab.</p>
   var Module = {
     touchHLEJit: new URLSearchParams(location.search).get('jit') === 'on',
     touchHLEFastUntil: 0,
+    touchHLEFastStart: false,
     canvas: document.getElementById('canvas'),
     print: log,
     printErr: log,
@@ -182,6 +183,7 @@ entirely in this tab.</p>
       const persistent = await restoreRootfsCache(data);
       window.touchHLEFirmwareReady = (extracted) => {
         Module.FS.unlink(path);
+        Module['touchHLEFastStart'] = true;
         statusEl.textContent = 'Starting SpringBoard…';
         if (persistent && extracted) {
           saveRootfsCache(persistent).catch(() => log('Could not save the root filesystem cache.'));
@@ -192,8 +194,8 @@ entirely in this tab.</p>
       ? 'Preparing firmware…'
       : 'Running ' + file.name;
     if (booting) {
-      // Keep timer yields during boot and drags. After release, avoid the
-      // browser's nested timer delay while the guest unlocks or opens an app.
+      // Use timer yields during drags. After release, avoid the browser's
+      // nested timer delay while the guest unlocks or opens an app.
       Module.canvas.addEventListener('pointerdown', (event) => {
         if (event.isPrimary) Module['touchHLEFastUntil'] = 0;
       });
@@ -205,6 +207,7 @@ entirely in this tab.</p>
       });
       window.touchHLEDisplay = (on) => {
         if (hasStopped) return;
+        if (on) Module['touchHLEFastStart'] = false;
         statusEl.textContent = on ? 'Running ' + file.name : 'Screen off. Tap it or press Home to wake it.';
       };
     }

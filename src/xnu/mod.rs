@@ -438,6 +438,14 @@ impl Kernel {
         argv: Vec<String>,
         env: Vec<String>,
     ) -> Result<(), String> {
+        #[cfg(target_os = "emscripten")]
+        {
+            // Fast yields past initial startup can miss the first swipe.
+            extern "C" {
+                fn touchhle_end_fast_start();
+            }
+            unsafe { touchhle_end_fast_start() };
+        }
         let (mem, vm, cpu) = Self::load_image(
             &self.fw,
             &self.vfs,

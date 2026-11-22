@@ -75,7 +75,12 @@ pub unsafe fn present_frame(
     let tex_coords: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY);
     gles.TexCoordPointer(2, gles11::FLOAT, 0, tex_coords.as_ptr() as *const GLvoid);
-    let matrix = Matrix::<4>::from(&rotation_matrix);
+    // Rotate and flip around the texture's center so the coordinates stay
+    // within 0..1, which clamped textures (needed on WebGL) require.
+    let [[a, b], [c, d]] = *rotation_matrix.columns();
+    let mut columns = *Matrix::<4>::from(&rotation_matrix).columns();
+    columns[3] = [0.5 - 0.5 * (a + c), 0.5 - 0.5 * (b + d), 0.0, 1.0];
+    let matrix = Matrix::<4>::from_columns(columns);
     gles.MatrixMode(gles11::TEXTURE);
     gles.LoadMatrixf(matrix.columns().as_ptr() as *const _);
     gles.Enable(gles11::TEXTURE_2D);

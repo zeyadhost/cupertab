@@ -757,12 +757,17 @@ fn mbx_copy(
     if x0 >= x1 {
         return;
     }
-    for y in y0..y1 {
-        let row = read_bytes(
-            &k.mem,
-            src.0 + (sy + y - y0) * src.1 + sx * 4,
-            (x1 - x0) * 4,
-        );
+    // Read the whole rectangle first, as it may overlap within one surface.
+    let rows: Vec<Vec<u8>> = (y0..y1)
+        .map(|y| {
+            read_bytes(
+                &k.mem,
+                src.0 + (sy + y - y0) * src.1 + sx * 4,
+                (x1 - x0) * 4,
+            )
+        })
+        .collect();
+    for (y, row) in (y0..y1).zip(rows) {
         write_bytes(&mut k.mem, dst.0 + y * dst.1 + x0 * 4, &row);
     }
 }

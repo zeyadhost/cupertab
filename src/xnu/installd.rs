@@ -264,10 +264,20 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
     }
+    // Renames are atomic, so an interruption leaves the old or the new
+    // bundle in place, never neither.
     let bundle = container.join(&app);
-    let _ = std::fs::remove_dir_all(&bundle);
+    let old = container.join(".replaced");
+    let _ = std::fs::remove_dir_all(&old);
+    if bundle.exists() {
+        std::fs::rename(&bundle, &old).map_err(|e| e.to_string())?;
+    }
     let swapped = std::fs::rename(staging.join(&app), &bundle).map_err(|e| e.to_string());
+    if swapped.is_err() {
+        let _ = std::fs::rename(&old, &bundle);
+    }
     let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_dir_all(&old);
     swapped?;
     Ok(app)
 }

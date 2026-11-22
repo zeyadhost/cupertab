@@ -7,14 +7,14 @@ When booting firmware, the browser saves the last extracted root filesystem
 image in local site storage. Select the same IPSW again to skip extraction.
 Clearing site data removes the cache.
 
-The browser compiles hot ARM and Thumb code to WebAssembly. Add `?jit=off` to
-the page URL to compare with the interpreter.
+The browser uses the interpreter by default. Add `?jit=on` to try the
+experimental ARM and Thumb WebAssembly JIT.
 
 ## How it differs from the native build
 
 | Part | Native | Web |
 | --- | --- | --- |
-| CPU | Dynarmic JIT | Wasm JIT with Rust interpreter fallback, ARMv6 slices preferred |
+| CPU | Dynarmic JIT | Rust interpreter, opt-in Wasm JIT, ARMv6 slices preferred |
 | Guest memory | 4 GiB reservation | 1 GiB window; the top 16 MiB (main thread stack) folds into its end |
 | Coroutines | corosensei | Emscripten fibers (`src/coroutine.rs`), needs `-sASYNCIFY` |
 | OpenGL | GLES 1.1 or GL 2.1 compat | GL 2.1 from [gl4es](https://github.com/ptitSeb/gl4es) on WebGL 1, one gl4es state per touchHLE context |

@@ -203,6 +203,70 @@ impl Kernel {
         }
     }
 
+    fn mmap_shm(
+        &mut self,
+        shm: std::rc::Rc<std::cell::RefCell<vfs::Shm>>,
+        size: u32,
+        prot: u32,
+    ) -> Ret {
+        if let Some(m) = self
+            .vfs
+            .shm_maps
+            .iter_mut()
+            .find(|m| std::rc::Rc::ptr_eq(&m.shm, &shm) && m.len >= size)
+        {
+            m.refs += 1;
+            return ok(m.addr);
+        }
+        // Map the whole object, so smaller mappings later share this one.
+        let size = size.max(round_up(shm.borrow().data.len() as u32));
+        let Some(base) = self
+            .vm
+            .map_anywhere(0, size, 0, Prot::from_bits(prot), "shm".into())
+        else {
+            return Ret::Err(ENOMEM);
+        };
+        write_bytes(&mut self.mem, base, &vec![0u8; size as usize]);
+        {
+            let data = &shm.borrow().data;
+            let n = data.len().min(size as usize);
+            write_bytes(&mut self.mem, base, &data[..n]);
+        }
+        self.vfs.shm_maps.push(vfs::ShmMap {
+            addr: base,
+            len: size,
+            refs: 1,
+            shm,
+        });
+        ok(base)
+    }
+
+    /// Writes back and forgets the shared memory mappings overlapping a range
+    /// that is about to be unmapped or replaced.
+    fn shm_forget(&mut self, addr: u32, size: u32) {
+        let end = addr.saturating_add(size);
+        while let Some(i) = self
+            .vfs
+            .shm_maps
+            .iter()
+            .position(|m| m.addr < end && addr < m.addr + m.len)
+        {
+            self.shm_unmapped(i);
+        }
+    }
+
+    /// Copies a shared memory mapping back into its object and unmaps it.
+    fn shm_unmapped(&mut self, i: usize) {
+        let m = self.vfs.shm_maps.remove(i);
+        {
+            let mut shm = m.shm.borrow_mut();
+            let n = shm.data.len().min(m.len as usize);
+            shm.data[..n].copy_from_slice(&read_bytes(&self.mem, m.addr, n as u32));
+        }
+        // The region may be larger than the guest asked for.
+        self.vm.unmap(m.addr, m.len);
+    }
+
     fn mmap(&mut self) -> Ret {
         let (addr, len, prot, flags, fd) = (
             self.arg(0),
@@ -218,6 +282,11 @@ impl Kernel {
             return Ret::Err(EINVAL);
         }
         let size = round_up(len);
+        if flags & MAP_ANON == 0 {
+            if let Some(FileKind::Shm(shm)) = self.vfs.fds.get(&fd).map(|f| &f.kind) {
+                return self.mmap_shm(shm.clone(), size, prot);
+            }
+        }
         // Read file contents before touching the address space, so a bad
         // descriptor leaves existing mappings intact.
         let contents = if flags & MAP_ANON == 0 {
@@ -232,6 +301,9 @@ impl Kernel {
         } else {
             None
         };
+        if flags & MAP_FIXED != 0 {
+            self.shm_forget(addr, size);
+        }
         let base = if flags & MAP_FIXED != 0 {
             if self
                 .vm
@@ -459,6 +531,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                         FileKind::Null => Some(FileKind::Null),
                         FileKind::Random => Some(FileKind::Random),
                         FileKind::Kqueue(kq) => Some(FileKind::Kqueue(kq.clone())),
+                        FileKind::Shm(shm) => Some(FileKind::Shm(shm.clone())),
                         _ => None,
                     };
                     match dup {
@@ -502,6 +575,16 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         60 => ok(0o022),
         73 => {
+            if let Some(m) = k
+                .vfs
+                .shm_maps
+                .iter_mut()
+                .find(|m| m.addr == args[0] && m.refs > 1)
+            {
+                m.refs -= 1;
+                return ok(0);
+            }
+            k.shm_forget(args[0], args[1]);
             k.vm.unmap(args[0], args[1]);
             ok(0)
         }
@@ -623,6 +706,44 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         196 => k.getdirentries(false),
         344 => k.getdirentries(true),
         197 => k.mmap(),
+        201 => {
+            let len = args[1] as u64 | (args[2] as u64) << 32;
+            match k.vfs.fds.get(&args[0]).map(|f| &f.kind) {
+                Some(FileKind::Shm(shm)) if len <= 1 << 28 => {
+                    shm.borrow_mut().data.resize(len as usize, 0);
+                    ok(0)
+                }
+                Some(FileKind::Host(file)) => match file.set_len(len) {
+                    Ok(()) => ok(0),
+                    Err(_) => Ret::Err(EINVAL),
+                },
+                Some(_) => Ret::Err(EINVAL),
+                None => Ret::Err(vfs::EBADF),
+            }
+        }
+        266 => {
+            const O_CREAT: u32 = 0x200;
+            const O_EXCL: u32 = 0x800;
+            let (name, oflag) = (read_cstr(&k.mem, args[0]), args[1]);
+            let shm = match k.vfs.shm.get(&name) {
+                Some(_) if oflag & O_CREAT != 0 && oflag & O_EXCL != 0 => {
+                    return Ret::Err(vfs::EEXIST)
+                }
+                Some(shm) => shm.clone(),
+                None if oflag & O_CREAT != 0 => k.vfs.shm.entry(name.clone()).or_default().clone(),
+                None => return Ret::Err(vfs::ENOENT),
+            };
+            ok(k.vfs.alloc_fd(OpenFile {
+                kind: FileKind::Shm(shm),
+                offset: 0,
+                path: name,
+                flags: oflag,
+            }))
+        }
+        267 => match k.vfs.shm.remove(&read_cstr(&k.mem, args[0])) {
+            Some(_) => ok(0),
+            None => Ret::Err(vfs::ENOENT),
+        },
         199 => {
             let fd = args[0];
             let off = (args[1] as u64 | (args[2] as u64) << 32) as i64;

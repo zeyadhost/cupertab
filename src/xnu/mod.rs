@@ -815,7 +815,11 @@ impl Kernel {
                     // fault in SpringBoard ends the run.
                     if self.pid != 1 {
                         log!("xnu: pid {} crashed: CPU error {e:?}", self.pid);
-                        self.exit_process(4); // SIGILL
+                        self.exit_process(match e {
+                            crate::cpu::CpuError::MemoryError => 11,         // SIGSEGV
+                            crate::cpu::CpuError::UndefinedInstruction => 4, // SIGILL
+                            crate::cpu::CpuError::Breakpoint => 5,           // SIGTRAP
+                        });
                         if let Some(idx) = self.pick_thread() {
                             self.switch_to(idx);
                         }

@@ -339,7 +339,7 @@ impl Mem {
                 zero_dirty_pages(ptr, size);
                 ptr.cast()
             }
-            None => unsafe { crate::mem::host::allocate_memory(size).unwrap() },
+            None => crate::mem::host::allocate_window(size).unwrap(),
         };
 
         assert_eq!(

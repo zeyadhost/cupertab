@@ -77,7 +77,7 @@ pub fn msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
         m.extend(w.to_le_bytes());
     }
     if let Some(p) = k.ipc.ports.get_mut(&reply_port) {
-        p.queue.push_back(m);
+        p.queue.push_back((m, 1, Vec::new()));
     }
     None
 }

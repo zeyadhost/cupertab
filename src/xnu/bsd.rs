@@ -333,7 +333,7 @@ impl Kernel {
             .vfs
             .shm_maps
             .iter_mut()
-            .find(|m| std::rc::Rc::ptr_eq(&m.shm, &shm) && m.len >= size)
+            .find(|m| m.pid == self.pid && std::rc::Rc::ptr_eq(&m.shm, &shm) && m.len >= size)
         {
             m.refs += 1;
             return ok(m.addr);
@@ -353,6 +353,7 @@ impl Kernel {
             write_bytes(&mut self.mem, base, &data[..n]);
         }
         self.vfs.shm_maps.push(vfs::ShmMap {
+            pid: self.pid,
             addr: base,
             len: size,
             refs: 1,
@@ -369,7 +370,7 @@ impl Kernel {
             .vfs
             .shm_maps
             .iter()
-            .position(|m| m.addr < end && addr < m.addr + m.len)
+            .position(|m| m.pid == self.pid && m.addr < end && addr < m.addr + m.len)
         {
             self.shm_unmapped(i);
         }
@@ -517,7 +518,11 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
     let args: [u32; 8] = std::array::from_fn(|i| k.arg(i));
     match num {
         1 => {
-            k.exit_status = Some(args[0] as i32);
+            if k.pid == 1 {
+                k.exit_status = Some(args[0] as i32);
+            } else {
+                k.exit_process(args[0] as i32);
+            }
             ok(0)
         }
         3 | 396 => k.do_read(args[0], args[1], args[2], None),
@@ -545,7 +550,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
             }
         }
         15 | 16 | 124 | 123 | 34 | 35 | 95 | 408 | 131 | 138 | 139 => ok(0), // chmod, chown, fchmod, fchown, chflags, fchflags, fsync, flock, utimes, futimes
-        20 => ok(1),        // getpid: we are the only process
+        20 => ok(k.pid),                                                     // getpid
         24 | 25 => ok(501), // getuid, geteuid: mobile
         43 | 47 => ok(501), // getegid, getgid
         39 => ok(1),
@@ -752,7 +757,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 .vfs
                 .shm_maps
                 .iter_mut()
-                .find(|m| m.addr == args[0] && m.refs > 1)
+                .find(|m| m.pid == k.pid && m.addr == args[0] && m.refs > 1)
             {
                 m.refs -= 1;
                 return ok(0);

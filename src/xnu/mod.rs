@@ -91,6 +91,20 @@ pub struct Thread {
     tls: u32,
     pub blocked: Option<Block>,
     pub exited: bool,
+    pub pid: u32,
+}
+
+/// A process whose threads aren't running. The running process's state
+/// lives in `Kernel` itself and is swapped with this on a switch.
+struct Parked {
+    mem: Mem,
+    cpu: Cpu,
+    vm: VmMap,
+    fds: std::collections::HashMap<u32, vfs::OpenFile>,
+    cwd: String,
+    task_port: u32,
+    bsdthread_start: u32,
+    pthread_size: u32,
 }
 
 pub struct Kernel {
@@ -120,6 +134,9 @@ pub struct Kernel {
     pub window: Option<Box<crate::window::Window>>,
     pub last_present: std::time::Instant,
     next_tid: u64,
+    /// The running process. SpringBoard is 1.
+    pub pid: u32,
+    parked: std::collections::HashMap<u32, Parked>,
     test_input: Vec<(u64, testinput::Action)>,
 }
 
@@ -130,47 +147,7 @@ impl Kernel {
         exe_path: &str,
         argv: Vec<String>,
     ) -> Result<Kernel, String> {
-        let mut mem = Mem::new();
-        let mut vm = VmMap::new(0x1000, 0x2f000000);
-
-        let exe = Self::read_fw_file(&fw, exe_path)?;
-        let main = loader::map_macho(&mut mem, &mut vm, &exe)?;
-        let dylinker_path = main
-            .dylinker
-            .clone()
-            .ok_or("Executable has no dynamic linker")?;
-        let dyld = loader::map_macho(&mut mem, &mut vm, &Self::read_fw_file(&fw, &dylinker_path)?)?;
-        log!(
-            "xnu: {exe_path} at {:#x}, dyld {dylinker_path} entry {:#x}",
-            main.mach_header,
-            dyld.entry
-        );
-        if main.page_zero != 0 {
-            mem.set_null_segment_size(main.page_zero.min(0x1000));
-        }
-
-        // The shared region is set up by the kernel (as if launchd had already
-        // mapped it), so dyld's shared_region_check_np finds it.
-        let cache = Self::read_fw_file(&fw, SHARED_CACHE_PATH)?;
-        Self::map_shared_cache(&mut mem, &mut vm, &cache)?;
-        drop(cache);
-
-        vm.map_fixed(STACK_TOP - STACK_SIZE, STACK_SIZE, Prot::RW, "stack".into())?;
-        vm.map_fixed(COMM_PAGE, 0x1000, Prot(1), "commpage".into())?;
-        Self::init_comm_page(&mut mem);
-
-        let envp = vec![
-            "HOME=/var/mobile".to_string(),
-            "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
-        ];
-        let apple = vec![exe_path.to_string()];
-        let sp = loader::build_stack(&mut mem, STACK_TOP, main.mach_header, &argv, &envp, &apple);
-
-        let mut cpu = Cpu::new(Some(&mut mem));
-        cpu.regs_mut()[Cpu::SP] = sp;
-        let entry = dyld.entry;
-        cpu.regs_mut()[Cpu::PC] = entry & !1;
-        cpu.set_cpsr(Cpu::CPSR_USER_MODE | if entry & 1 != 0 { Cpu::CPSR_THUMB } else { 0 });
+        let (mem, vm, cpu) = Self::load_image(&fw, exe_path, &argv, Vec::new())?;
 
         let mut ipc = mach::Ipc::new();
         let thread_port = ipc.new_kernel_port(mach::KObject::Thread(0));
@@ -191,6 +168,7 @@ impl Kernel {
                 tls: 0,
                 blocked: None,
                 exited: false,
+                pid: 1,
             }],
             current: 0,
             start: std::time::Instant::now(),
@@ -205,8 +183,63 @@ impl Kernel {
             window: None,
             last_present: std::time::Instant::now(),
             next_tid: 1,
+            pid: 1,
+            parked: Default::default(),
             test_input: testinput::parse(),
         })
+    }
+
+    /// Maps an executable, its dynamic linker, the shared cache, a stack and
+    /// the comm page into a fresh address space, with a CPU at dyld's entry.
+    fn load_image(
+        fw: &Firmware,
+        exe_path: &str,
+        argv: &[String],
+        env: Vec<String>,
+    ) -> Result<(Mem, VmMap, Cpu), String> {
+        let mut mem = Mem::new();
+        let mut vm = VmMap::new(0x1000, 0x2f000000);
+
+        let exe = Self::read_fw_file(fw, exe_path)?;
+        let main = loader::map_macho(&mut mem, &mut vm, &exe)?;
+        let dylinker_path = main
+            .dylinker
+            .clone()
+            .ok_or("Executable has no dynamic linker")?;
+        let dyld = loader::map_macho(&mut mem, &mut vm, &Self::read_fw_file(fw, &dylinker_path)?)?;
+        log!(
+            "xnu: {exe_path} at {:#x}, dyld {dylinker_path} entry {:#x}",
+            main.mach_header,
+            dyld.entry
+        );
+        if main.page_zero != 0 {
+            mem.set_null_segment_size(main.page_zero.min(0x1000));
+        }
+
+        // The shared region is set up by the kernel (as if launchd had already
+        // mapped it), so dyld's shared_region_check_np finds it.
+        let cache = Self::read_fw_file(fw, SHARED_CACHE_PATH)?;
+        Self::map_shared_cache(&mut mem, &mut vm, &cache)?;
+        drop(cache);
+
+        vm.map_fixed(STACK_TOP - STACK_SIZE, STACK_SIZE, Prot::RW, "stack".into())?;
+        vm.map_fixed(COMM_PAGE, 0x1000, Prot(1), "commpage".into())?;
+        Self::init_comm_page(&mut mem);
+
+        let mut envp = vec![
+            "HOME=/var/mobile".to_string(),
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+        ];
+        envp.extend(env);
+        let apple = vec![exe_path.to_string()];
+        let sp = loader::build_stack(&mut mem, STACK_TOP, main.mach_header, argv, &envp, &apple);
+
+        let mut cpu = Cpu::new(Some(&mut mem));
+        cpu.regs_mut()[Cpu::SP] = sp;
+        let entry = dyld.entry;
+        cpu.regs_mut()[Cpu::PC] = entry & !1;
+        cpu.set_cpsr(Cpu::CPSR_USER_MODE | if entry & 1 != 0 { Cpu::CPSR_THUMB } else { 0 });
+        Ok((mem, vm, cpu))
     }
 
     fn read_fw_file(fw: &Firmware, path: &str) -> Result<Vec<u8>, String> {
@@ -282,6 +315,10 @@ impl Kernel {
             .unwrap_or_else(|| Box::new(CpuContext::new()));
         self.cpu.swap_context(&mut ctx);
         // ctx now holds the old thread's state
+        let next_pid = self.threads[idx].pid;
+        if next_pid != self.pid {
+            self.swap_process(next_pid);
+        }
         let next_ctx = self.threads[idx].context.take();
         let cur = &mut self.threads[self.current];
         if cur.exited {
@@ -335,12 +372,156 @@ impl Kernel {
             tls,
             blocked: None,
             exited: false,
+            pid: self.pid,
         };
         match reuse {
             Some(i) => self.threads[i] = thread,
             None => self.threads.push(thread),
         }
         port
+    }
+
+    fn swap_process(&mut self, pid: u32) {
+        let Some(mut p) = self.parked.remove(&pid) else {
+            return;
+        };
+        std::mem::swap(&mut self.mem, &mut p.mem);
+        std::mem::swap(&mut self.cpu, &mut p.cpu);
+        std::mem::swap(&mut self.vm, &mut p.vm);
+        std::mem::swap(&mut self.vfs.fds, &mut p.fds);
+        std::mem::swap(&mut self.vfs.cwd, &mut p.cwd);
+        std::mem::swap(&mut self.ipc.task_port, &mut p.task_port);
+        std::mem::swap(&mut self.bsdthread_start, &mut p.bsdthread_start);
+        std::mem::swap(&mut self.pthread_size, &mut p.pthread_size);
+        let old = std::mem::replace(&mut self.pid, pid);
+        // A process with no threads left is gone, memory and all.
+        if self.threads.iter().any(|t| t.pid == old && !t.exited) {
+            self.parked.insert(old, p);
+        }
+    }
+
+    /// Starts `exe_path` as process `pid` with one thread, as launchd does.
+    pub fn spawn_process(
+        &mut self,
+        pid: u32,
+        exe_path: &str,
+        argv: Vec<String>,
+        env: Vec<String>,
+    ) -> Result<(), String> {
+        let (mem, vm, cpu) = Self::load_image(&self.fw, exe_path, &argv, env)?;
+        let task_port = self.ipc.new_kernel_port(mach::KObject::Task(pid));
+        let id = self.threads.len() as u32;
+        let port = self.ipc.new_kernel_port(mach::KObject::Thread(id));
+        self.parked.insert(
+            pid,
+            Parked {
+                mem,
+                cpu,
+                vm,
+                fds: vfs::Vfs::stdio(),
+                cwd: "/".into(),
+                task_port,
+                bsdthread_start: 0,
+                pthread_size: 0,
+            },
+        );
+        let tid = self.next_tid;
+        self.next_tid += 1;
+        // No saved context: the parked CPU already holds the entry state.
+        self.threads.push(Thread {
+            id,
+            tid,
+            port,
+            context: None,
+            tls: 0,
+            blocked: None,
+            exited: false,
+            pid,
+        });
+        log!("xnu: started {exe_path} as pid {pid}");
+        Ok(())
+    }
+
+    /// Ends the running process (not SpringBoard, whose exit stops the boot).
+    pub fn exit_process(&mut self, status: i32) {
+        let pid = self.pid;
+        for t in self.threads.iter_mut().filter(|t| t.pid == pid) {
+            t.exited = true;
+        }
+        lockdown::job_exited(pid, status);
+        log!("xnu: pid {pid} exited with status {status}");
+    }
+
+    /// A process's memory, whether or not it is the running one.
+    pub fn mem_for(&mut self, pid: u32) -> Option<&mut Mem> {
+        if pid == self.pid {
+            Some(&mut self.mem)
+        } else {
+            self.parked.get_mut(&pid).map(|p| &mut p.mem)
+        }
+    }
+
+    pub fn task_port_for(&self, pid: u32) -> Option<u32> {
+        if pid == self.pid {
+            Some(self.ipc.task_port)
+        } else {
+            self.parked.get(&pid).map(|p| p.task_port)
+        }
+    }
+
+    /// Starts the jobs submitted to launchd since the last call, creating
+    /// their Mach services first so clients can look them up right away.
+    fn start_jobs(&mut self) {
+        for job in lockdown::take_spawns() {
+            for name in job.mach_services {
+                let port = self.ipc.new_port();
+                self.ipc.services.insert(name, port);
+            }
+            if let Err(e) = self.spawn_process(job.pid, &job.program, job.args, job.env) {
+                log!("xnu: couldn't start {}: {e}", job.label);
+                lockdown::job_exited(job.pid, 1);
+            }
+        }
+    }
+
+    /// Starts the daemon behind a service on its first look-up, as launchd
+    /// does for its jobs' MachServices. Only daemons known to work are run.
+    pub fn start_on_demand(&mut self, service: &str) -> Option<u32> {
+        const ON_DEMAND: &[&str] = &["com.apple.lsd"];
+        if !ON_DEMAND.contains(&service) {
+            return None;
+        }
+        let path = format!("/System/Library/LaunchDaemons/{service}.plist");
+        let bytes = Self::read_fw_file(&self.fw, &path).ok()?;
+        let job = plist::Value::from_reader(std::io::Cursor::new(bytes)).ok()?;
+        let job = job.as_dictionary()?;
+        let args: Vec<String> = job
+            .get("ProgramArguments")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_string().map(str::to_string))
+            .collect();
+        let program = job
+            .get("Program")
+            .and_then(plist::Value::as_string)
+            .map(str::to_string)
+            .or_else(|| args.first().cloned())?;
+        for name in job
+            .get("MachServices")
+            .and_then(plist::Value::as_dictionary)
+            .into_iter()
+            .flat_map(|d| d.keys())
+        {
+            let port = self.ipc.new_port();
+            self.ipc.services.insert(name.clone(), port);
+        }
+        let pid = lockdown::submit_job(service);
+        if let Err(e) = self.spawn_process(pid, &program, args, Vec::new()) {
+            log!("xnu: couldn't start {service}: {e}");
+            lockdown::job_exited(pid, 1);
+            return None;
+        }
+        self.ipc.services.get(service).copied()
     }
 
     pub fn current_thread(&mut self) -> &mut Thread {
@@ -480,9 +661,13 @@ impl Kernel {
         if s.bytes_per_element != 4 {
             return;
         }
+        let mem = match self.parked.get(&s.pid) {
+            Some(p) if s.pid != self.pid => &p.mem,
+            _ => &self.mem,
+        };
         let mut pixels = Vec::with_capacity((s.width * s.height * 4) as usize);
         for y in 0..s.height {
-            let row = read_bytes(&self.mem, s.addr + y * s.bytes_per_row, s.width * 4);
+            let row = read_bytes(mem, s.addr + y * s.bytes_per_row, s.width * 4);
             for bgra in row.chunks(4) {
                 pixels.extend([bgra[2], bgra[1], bgra[0], 255]);
             }
@@ -507,6 +692,9 @@ impl Kernel {
     pub fn run(&mut self) -> Result<i32, String> {
         let mut ticks_left: u64;
         loop {
+            if lockdown::spawns_pending() {
+                self.start_jobs();
+            }
             self.skip_stall();
             if self.last_present.elapsed() >= std::time::Duration::from_millis(16) {
                 self.present();

@@ -10,7 +10,7 @@
 //! for example SpringBoard finds its `N82AP.plist` from `IODeviceTree:/`.
 
 use super::mach::{le, ool_reply, reply, KObject, KERN_SUCCESS, MACH_MSG_TYPE_PORT_SEND};
-use super::{read_bytes, read_u32, write_bytes, write_u32, Kernel};
+use super::{read_bytes, read_u32, write_bytes, write_u32, Kernel, Mem};
 use crate::firmware::IpswInfo;
 
 const KIO_RETURN_NOT_FOUND: u32 = 0xe00002f0;
@@ -58,6 +58,8 @@ pub struct Registry {
     pub surfaces: Vec<Surface>,
     /// The IOSurface the LCD shows, from the last swap.
     pub presented_surface: u32,
+    /// The window server, the one process whose swaps reach the LCD.
+    pub lcd_owner: Option<u32>,
     /// MBX2D's command buffer, allocated on first use.
     pub mbx_command_buffer: u32,
     /// Surfaces mapped for MBX2D: the IOSurface ID by mapping handle.
@@ -68,7 +70,8 @@ pub struct Registry {
     /// Enabled framebuffer vsync callbacks, by connection port.
     pub vsyncs: std::collections::HashMap<u32, VSync>,
     /// Mapped HID event queues (`IODataQueueMemory`), by connection port.
-    pub hid_queues: std::collections::HashMap<u32, u32>,
+    /// Each HID connection's event queue: the mapping process and address.
+    pub hid_queues: std::collections::HashMap<u32, (u32, u32)>,
 }
 
 /// A framebuffer vsync callback, sent at 60 Hz as an async completion.
@@ -105,6 +108,8 @@ impl VSync {
 
 /// An IOSurface: pixels in guest memory, shared by every client.
 pub struct Surface {
+    /// The process whose memory holds the pixels.
+    pub pid: u32,
     pub addr: u32,
     pub alloc_size: u32,
     pub width: u32,
@@ -134,6 +139,7 @@ impl Registry {
             entries: Vec::new(),
             surfaces: Vec::new(),
             presented_surface: 0,
+            lcd_owner: None,
             mbx_command_buffer: 0,
             mbx_handles: Default::default(),
             next_mbx_handle: 1,
@@ -514,13 +520,13 @@ pub fn msg(k: &mut Kernel, obj: KObject, msg: &[u8]) -> Option<Vec<u8>> {
         {
             let conn = le(msg, 8);
             let addr = match k.iokit.hid_queues.get(&conn) {
-                Some(&addr) => addr,
+                Some(&(_, addr)) => addr,
                 None => {
                     let addr = k.vm_allocate(0, HID_QUEUE_SIZE, 0, 1, "IOHIDEventQueue")?;
                     write_u32(&mut k.mem, addr, HID_QUEUE_SIZE - 12);
                     write_u32(&mut k.mem, addr + 4, 0);
                     write_u32(&mut k.mem, addr + 8, 0);
-                    k.iokit.hid_queues.insert(conn, addr);
+                    k.iokit.hid_queues.insert(conn, (k.pid, addr));
                     addr
                 }
             };
@@ -672,7 +678,9 @@ fn framebuffer_method(
         // Swap: the second word of the 140-byte request is the IOSurface to
         // show, or 0 for none.
         5 if inband.len() >= 8 => {
-            k.iokit.presented_surface = le(inband, 4);
+            if *k.iokit.lcd_owner.get_or_insert(k.pid) == k.pid {
+                k.iokit.presented_surface = le(inband, 4);
+            }
             (vec![0], Vec::new())
         }
         3 | 4 | 5 | 7 | 12 | 15 | 17 | 19 | 22 | 33 => (vec![0], Vec::new()),
@@ -1009,6 +1017,7 @@ fn surface_method(
             let pages = alloc_size.checked_add(0xfff)? & !0xfff;
             let addr = k.vm_allocate(0, pages + 0x1000, 0, 1, "IOSurface")?;
             let surface = Surface {
+                pid: k.pid,
                 addr,
                 alloc_size,
                 width,
@@ -1062,6 +1071,7 @@ fn surface_method(
             }
             let seed_block = k.vm_allocate(0, 0x1000, 0, 1, "IOSurface seed")?;
             k.iokit.surfaces.push(Surface {
+                pid: k.pid,
                 addr,
                 alloc_size,
                 width,
@@ -1187,14 +1197,17 @@ impl Kernel {
     }
 
     fn hid_post(&mut self, data: &[u8]) {
-        let queues: Vec<(u32, u32)> = self
+        let queues: Vec<(u32, (u32, u32))> = self
             .iokit
             .hid_queues
             .iter()
-            .map(|(&c, &a)| (c, a))
+            .map(|(&c, &q)| (c, q))
             .collect();
-        for (conn, addr) in queues {
-            if !self.hid_enqueue(addr, data) {
+        for (conn, (pid, addr)) in queues {
+            if !self
+                .mem_for(pid)
+                .is_some_and(|mem| hid_enqueue(mem, addr, data))
+            {
                 continue;
             }
             let Some(&port) = self.iokit.notify_ports.get(&conn) else {
@@ -1208,41 +1221,41 @@ impl Kernel {
             }
             if let Some(p) = self.ipc.ports.get_mut(&port) {
                 if p.queue.is_empty() {
-                    p.queue.push_back(m);
+                    p.queue.push_back((m, 1, Vec::new()));
                 }
             }
         }
     }
+}
 
-    /// Appends an entry to an `IODataQueueMemory` (queue size, head, tail,
-    /// then entries of a size word and the data), wrapping like IODataQueue.
-    fn hid_enqueue(&mut self, addr: u32, data: &[u8]) -> bool {
-        let size = read_u32(&self.mem, addr);
-        let head = read_u32(&self.mem, addr + 4);
-        let tail = read_u32(&self.mem, addr + 8);
-        let entry = 4 + data.len() as u32;
-        if size > HID_QUEUE_SIZE - 12 || head > size || tail > size {
-            return false;
-        }
-        let at = if tail >= head {
-            if tail + entry <= size {
-                tail
-            } else if entry < head {
-                if tail + 4 <= size {
-                    write_u32(&mut self.mem, addr + 12 + tail, data.len() as u32);
-                }
-                0
-            } else {
-                return false;
-            }
-        } else if tail + entry < head {
+/// Appends an entry to an `IODataQueueMemory` (queue size, head, tail,
+/// then entries of a size word and the data), wrapping like IODataQueue.
+fn hid_enqueue(mem: &mut Mem, addr: u32, data: &[u8]) -> bool {
+    let size = read_u32(mem, addr);
+    let head = read_u32(mem, addr + 4);
+    let tail = read_u32(mem, addr + 8);
+    let entry = 4 + data.len() as u32;
+    if size > HID_QUEUE_SIZE - 12 || head > size || tail > size {
+        return false;
+    }
+    let at = if tail >= head {
+        if tail + entry <= size {
             tail
+        } else if entry < head {
+            if tail + 4 <= size {
+                write_u32(mem, addr + 12 + tail, data.len() as u32);
+            }
+            0
         } else {
             return false;
-        };
-        write_u32(&mut self.mem, addr + 12 + at, data.len() as u32);
-        write_bytes(&mut self.mem, addr + 16 + at, data);
-        write_u32(&mut self.mem, addr + 8, at + entry);
-        true
-    }
+        }
+    } else if tail + entry < head {
+        tail
+    } else {
+        return false;
+    };
+    write_u32(mem, addr + 12 + at, data.len() as u32);
+    write_bytes(mem, addr + 16 + at, data);
+    write_u32(mem, addr + 8, at + entry);
+    true
 }

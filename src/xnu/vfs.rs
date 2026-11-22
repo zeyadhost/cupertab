@@ -20,6 +20,7 @@ pub const EEXIST: u32 = 17;
 pub const ENOTDIR: u32 = 20;
 pub const EISDIR: u32 = 21;
 pub const EINVAL: u32 = 22;
+pub const EROFS: u32 = 30;
 
 pub const O_RDWR: u32 = 2;
 pub const O_APPEND: u32 = 8;
@@ -69,9 +70,10 @@ pub struct Shm {
     pub data: Vec<u8>,
 }
 
-/// A live mapping of a shared memory object. Mappings that fit share one
-/// region, since the guest is a single process.
+/// A live mapping of a shared memory object. A process's mappings that fit
+/// share one region.
 pub struct ShmMap {
+    pub pid: u32,
     pub addr: u32,
     pub len: u32,
     pub refs: u32,
@@ -142,8 +144,8 @@ pub fn normalize(cwd: &str, path: &str) -> String {
 }
 
 impl Vfs {
-    pub fn new(overlay: &Path) -> Vfs {
-        let _ = std::fs::create_dir_all(overlay);
+    /// A new process's standard input, output and error.
+    pub fn stdio() -> HashMap<u32, OpenFile> {
         let mut fds = HashMap::new();
         for fd in 0..3 {
             fds.insert(
@@ -156,9 +158,14 @@ impl Vfs {
                 },
             );
         }
+        fds
+    }
+
+    pub fn new(overlay: &Path) -> Vfs {
+        let _ = std::fs::create_dir_all(overlay);
         Vfs {
             overlay: overlay.to_path_buf(),
-            fds,
+            fds: Self::stdio(),
             cwd: "/".into(),
             deleted: Default::default(),
             shm: HashMap::new(),
@@ -170,6 +177,12 @@ impl Vfs {
         let fd = (0..).find(|fd| !self.fds.contains_key(fd)).unwrap();
         self.fds.insert(fd, file);
         fd
+    }
+
+    /// Only the data partition is writable; the system partition is mounted
+    /// read-only, as on the device.
+    fn writable(canon: &str) -> bool {
+        canon == "/private/var" || canon.starts_with("/private/var/")
     }
 
     fn host_path(&self, path: &str) -> PathBuf {
@@ -341,6 +354,13 @@ impl Vfs {
                 }
             }
             existing => {
+                if !Self::writable(&canon) {
+                    return Err(if existing.is_none() && flags & O_CREAT == 0 {
+                        ENOENT
+                    } else {
+                        EROFS
+                    });
+                }
                 // Copy up (or create) in the overlay.
                 let host = self.host_path(&canon);
                 if let Some(parent) = host.parent() {
@@ -522,7 +542,11 @@ impl Vfs {
         if self.resolve(fw, path, false).is_some() {
             return Err(EEXIST);
         }
-        std::fs::create_dir_all(self.host_path(&self.canonical(fw, path))).map_err(|_| EACCES)
+        let canon = self.canonical(fw, path);
+        if !Self::writable(&canon) {
+            return Err(EROFS);
+        }
+        std::fs::create_dir_all(self.host_path(&canon)).map_err(|_| EACCES)
     }
 
     pub fn unlink(&mut self, fw: &Firmware, path: &str) -> Result<(), u32> {
@@ -543,6 +567,9 @@ impl Vfs {
 
     pub fn rename(&mut self, fw: &Firmware, from: &str, to: &str) -> Result<(), u32> {
         let (from_canon, to_canon) = (self.canonical(fw, from), self.canonical(fw, to));
+        if !Self::writable(&to_canon) {
+            return Err(EROFS);
+        }
         match self.resolve(fw, from, false).ok_or(ENOENT)? {
             Resolved::Host(p) => {
                 let dest = self.host_path(&to_canon);

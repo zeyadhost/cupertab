@@ -29,7 +29,12 @@ pub fn parse() -> Vec<(u64, Action)> {
             continue;
         };
         let t = (t * 1e9) as u64;
-        let f = |i: usize| parts.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.5);
+        let f = |i: usize| {
+            parts
+                .get(i)
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(0.5)
+        };
         match parts.get(1).copied() {
             Some("home") => out.push((t, Action::Home)),
             Some("dump") => out.push((t, Action::Dump(parts[2..].join(":")))),
@@ -84,9 +89,13 @@ impl Kernel {
             log!("xnu: no surface to dump");
             return;
         };
+        let mem = match self.parked.get(&s.pid) {
+            Some(p) if s.pid != self.pid => &p.mem,
+            _ => &self.mem,
+        };
         let mut out = format!("P6 {} {} 255\n", s.width, s.height).into_bytes();
         for y in 0..s.height {
-            let row = read_bytes(&self.mem, s.addr + y * s.bytes_per_row, s.width * 4);
+            let row = read_bytes(mem, s.addr + y * s.bytes_per_row, s.width * 4);
             for b in row.chunks(4) {
                 out.extend([b[2], b[1], b[0]]);
             }

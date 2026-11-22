@@ -255,12 +255,16 @@ impl Kernel {
         }
     }
 
-    /// Copies a shared memory mapping back into its object and forgets it.
+    /// Copies a shared memory mapping back into its object and unmaps it.
     fn shm_unmapped(&mut self, i: usize) {
         let m = self.vfs.shm_maps.remove(i);
-        let mut shm = m.shm.borrow_mut();
-        let n = shm.data.len().min(m.len as usize);
-        shm.data[..n].copy_from_slice(&read_bytes(&self.mem, m.addr, n as u32));
+        {
+            let mut shm = m.shm.borrow_mut();
+            let n = shm.data.len().min(m.len as usize);
+            shm.data[..n].copy_from_slice(&read_bytes(&self.mem, m.addr, n as u32));
+        }
+        // The region may be larger than the guest asked for.
+        self.vm.unmap(m.addr, m.len);
     }
 
     fn mmap(&mut self) -> Ret {

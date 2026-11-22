@@ -218,6 +218,7 @@ impl Kernel {
             Ok(st) => st,
             Err(e) => return Ret::Err(e),
         };
+        let path = super::vfs::normalize(&self.vfs.cwd, &path);
         let parent =
             path.trim_end_matches('/')
                 .rsplit_once('/')

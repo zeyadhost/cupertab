@@ -13,6 +13,7 @@
 
 use crate::firmware::IpswInfo;
 use plist::{Dictionary, Value};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 pub const LOCKDOWN_SOCKET: &str = "/var/run/lockdown.sock";
@@ -28,7 +29,6 @@ pub enum Service {
 #[derive(Default)]
 pub struct Socket {
     pub service: Option<Service>,
-    jobs: Vec<String>,
     rx: VecDeque<u8>,
     tx: Vec<u8>,
 }
@@ -58,7 +58,7 @@ impl Socket {
     pub fn write(&mut self, buf: &[u8]) -> usize {
         if let Some(Service::Launchd) = self.service {
             self.tx.extend_from_slice(buf);
-            launchd_frames(&mut self.tx, &mut self.rx, &mut self.jobs);
+            launchd_frames(&mut self.tx, &mut self.rx);
         } else if let Some(Service::Lockdownd(service)) = &self.service {
             self.tx.extend_from_slice(buf);
             while self.tx.len() >= 4 {
@@ -168,7 +168,15 @@ fn pack(d: &LaunchData, out: &mut Vec<u8>) {
 /// total length) before its packed request, which names its command as a
 /// string or as a dictionary's only key. Submitted jobs are remembered and
 /// reported as running, but nothing is spawned for them.
-fn launchd_frames(tx: &mut Vec<u8>, rx: &mut VecDeque<u8>, jobs: &mut Vec<String>) {
+fn launchd_frames(tx: &mut Vec<u8>, rx: &mut VecDeque<u8>) {
+    thread_local! {
+        // launchd's jobs outlive the connection that submitted them.
+        static JOBS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+    JOBS.with_borrow_mut(|jobs| launchd_frames_with(tx, rx, jobs));
+}
+
+fn launchd_frames_with(tx: &mut Vec<u8>, rx: &mut VecDeque<u8>, jobs: &mut Vec<String>) {
     const MAGIC: u64 = 0xd2fe_a023_66b3_9a41;
     const ESRCH: u64 = 3;
     // An arbitrary PID other than SpringBoard's own.
@@ -200,9 +208,16 @@ fn launchd_frames(tx: &mut Vec<u8>, rx: &mut VecDeque<u8>, jobs: &mut Vec<String
             _ => None,
         };
         let job_label = arg.as_ref().and_then(label);
+        let job = |l: String| {
+            LaunchData::Dict(vec![
+                ("Label".into(), LaunchData::Str(l)),
+                ("PID".into(), LaunchData::Int(JOB_PID)),
+            ])
+        };
         log_dbg!("xnu: launchd {command:?} {job_label:?}");
         let reply = match command.as_str() {
             "SubmitJob" => {
+                jobs.retain(|j| Some(j) != job_label.as_ref());
                 jobs.extend(job_label);
                 LaunchData::Errno(0)
             }
@@ -211,13 +226,12 @@ fn launchd_frames(tx: &mut Vec<u8>, rx: &mut VecDeque<u8>, jobs: &mut Vec<String
                 LaunchData::Errno(0)
             }
             "GetJob" => match job_label.filter(|l| jobs.contains(l)) {
-                Some(l) => LaunchData::Dict(vec![
-                    ("Label".into(), LaunchData::Str(l)),
-                    ("PID".into(), LaunchData::Int(JOB_PID)),
-                ]),
+                Some(l) => job(l),
                 None => LaunchData::Errno(ESRCH),
             },
-            "GetJobs" => LaunchData::Dict(Vec::new()),
+            "GetJobs" => {
+                LaunchData::Dict(jobs.iter().map(|l| (l.clone(), job(l.clone()))).collect())
+            }
             _ => LaunchData::Errno(0),
         };
         let mut out = Vec::new();

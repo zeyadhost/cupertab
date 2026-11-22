@@ -221,37 +221,53 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
     for dir in ["Documents", "Library/Preferences", "Library/Caches", "tmp"] {
         std::fs::create_dir_all(container.join(dir)).map_err(|e| e.to_string())?;
     }
-    for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-        let Some(rel) = entry
-            .enclosed_name()
-            .and_then(|p| p.strip_prefix("Payload").ok())
-            .map(Path::to_path_buf)
-        else {
-            continue;
-        };
-        if !rel.starts_with(&app) {
-            continue;
+    // Unpack beside the old bundle and swap it in only once every entry is
+    // out, so a bad IPA leaves the installed app as it was.
+    let staging = container.join(".installing");
+    let _ = std::fs::remove_dir_all(&staging);
+    let unpacked = (|| -> Result<(), String> {
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+            let Some(rel) = entry
+                .enclosed_name()
+                .and_then(|p| p.strip_prefix("Payload").ok())
+                .map(Path::to_path_buf)
+            else {
+                continue;
+            };
+            if !rel.starts_with(&app) {
+                continue;
+            }
+            // enclosed_name allows inner "..", which would leave the bundle once
+            // the Payload prefix is stripped.
+            if rel
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(format!("bad path in the IPA: {}", rel.display()));
+            }
+            let out = staging.join(rel);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
+            std::fs::write(&out, data).map_err(|e| e.to_string())?;
         }
-        // enclosed_name allows inner "..", which would leave the bundle once
-        // the Payload prefix is stripped.
-        if rel
-            .components()
-            .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return Err(format!("bad path in the IPA: {}", rel.display()));
-        }
-        let out = container.join(rel);
-        if entry.is_dir() {
-            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-            continue;
-        }
-        if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
-        std::fs::write(&out, data).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if let Err(e) = unpacked {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
     }
+    let bundle = container.join(&app);
+    let _ = std::fs::remove_dir_all(&bundle);
+    let swapped = std::fs::rename(staging.join(&app), &bundle).map_err(|e| e.to_string());
+    let _ = std::fs::remove_dir_all(&staging);
+    swapped?;
     Ok(app)
 }

@@ -782,6 +782,11 @@ impl Kernel {
         loop {
             if lockdown::spawns_pending() {
                 self.start_jobs();
+                #[cfg(target_os = "emscripten")]
+                {
+                    // Process load time is not browser suspension.
+                    self.last_tick = std::time::Instant::now();
+                }
             }
             self.skip_stall();
             if self.last_present.elapsed() >= std::time::Duration::from_millis(16) {
@@ -814,6 +819,11 @@ impl Kernel {
                 }
                 CpuState::Svc(0x80) => {
                     self.syscall();
+                    #[cfg(target_os = "emscripten")]
+                    {
+                        // Keep synchronous I/O in the guest clock.
+                        self.last_tick = std::time::Instant::now();
+                    }
                     if std::mem::take(&mut self.yield_requested) {
                         if let Some(idx) = self.pick_thread() {
                             self.switch_to(idx);

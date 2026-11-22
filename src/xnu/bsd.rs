@@ -9,6 +9,7 @@
 use super::vfs::{self, FileKind, OpenFile, Stat};
 use super::vm::{round_up, Prot};
 use super::{read_bytes, read_cstr, read_u32, write_bytes, write_u32, Kernel};
+use crate::mem::Ptr;
 
 pub enum Ret {
     Ok(u32, u32),
@@ -410,6 +411,9 @@ impl Kernel {
             return Ret::Err(EINVAL);
         }
         let size = round_up(len);
+        if size < len {
+            return Ret::Err(ENOMEM);
+        }
         if flags & MAP_ANON == 0 {
             if let Some(FileKind::Shm(shm)) = self.vfs.fds.get(&fd).map(|f| &f.kind) {
                 return self.mmap_shm(shm.clone(), size, prot);
@@ -418,12 +422,8 @@ impl Kernel {
         // Read file contents before touching the address space, so a bad
         // descriptor leaves existing mappings intact.
         let contents = if flags & MAP_ANON == 0 {
-            let mut tmp = vec![0u8; len as usize];
-            match self.vfs.read(&self.fw, fd, &mut tmp, Some(offset)) {
-                Ok(n) => {
-                    tmp.truncate(n);
-                    Some(tmp)
-                }
+            match self.vfs.read_mapping(&self.fw, fd, len, offset) {
+                Ok(data) => Some(data),
                 Err(e) => return Ret::Err(e),
             }
         } else {
@@ -455,9 +455,12 @@ impl Kernel {
                 None => return Ret::Err(ENOMEM),
             }
         };
-        write_bytes(&mut self.mem, base, &vec![0u8; size as usize]);
-        if let Some(contents) = contents {
-            write_bytes(&mut self.mem, base, &contents);
+        let mapping = self.mem.bytes_at_mut(Ptr::from_bits(base), size);
+        let data: &[u8] = contents.as_ref().map_or(&[], |data| data.as_slice());
+        let (file, padding) = mapping.split_at_mut(data.len());
+        file.copy_from_slice(data);
+        padding.fill(0);
+        if contents.is_some() {
             self.cpu.invalidate_cache_range(base, size);
         }
         ok(base)

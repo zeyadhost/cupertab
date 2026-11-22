@@ -219,11 +219,12 @@ fn token_msg(k: &mut Kernel, msg: &[u8], routine: u32) -> Option<Vec<u8>> {
     let token = arg(0);
     let Some(r) = n.tokens.get_mut(&token) else {
         log!("xnu: notifyd routine {routine} on unknown token {token}");
-        return Some(reply(
-            msg,
-            &[KERN_SUCCESS, NOTIFY_STATUS_INVALID_TOKEN],
-            &[],
-        ));
+        let words: &[u32] = match routine {
+            12 => &[KERN_SUCCESS, 0, NOTIFY_STATUS_INVALID_TOKEN],
+            13 => &[KERN_SUCCESS, 0, 0, NOTIFY_STATUS_INVALID_TOKEN],
+            _ => &[KERN_SUCCESS, NOTIFY_STATUS_INVALID_TOKEN],
+        };
+        return Some(reply(msg, words, &[]));
     };
     if k.trace {
         log!("xnu: notifyd {routine} on {:?}", r.name);

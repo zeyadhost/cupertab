@@ -169,7 +169,8 @@ fn user_apps(k: &Kernel) -> Dictionary {
 }
 
 /// Unpacks an IPA's `Payload/<name>.app` into a container in
-/// /var/mobile/Applications named after the bundle, as installd would.
+/// /var/mobile/Applications named after its bundle identifier, as installd
+/// would.
 /// Returns the bundle's name.
 pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
     let file = std::fs::File::open(ipa).map_err(|e| e.to_string())?;
@@ -181,12 +182,29 @@ pub fn install_ipa(k: &Kernel, ipa: &Path) -> Result<String, String> {
         .map(str::to_string)
         .ok_or("no Payload/*.app in the IPA")?;
 
-    // A stable container name, so reinstalling an app keeps its documents.
+    let id = zip
+        .by_name(&format!("Payload/{app}/Info.plist"))
+        .ok()
+        .and_then(|mut f| {
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).ok()?;
+            plist::Value::from_reader(std::io::Cursor::new(data)).ok()
+        })
+        .and_then(|v| {
+            v.as_dictionary()?
+                .get("CFBundleIdentifier")?
+                .as_string()
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| app.clone());
+
+    // A stable container name per bundle identifier, so reinstalling an app
+    // keeps its documents and different apps never share one.
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    app.hash(&mut h);
+    id.hash(&mut h);
     let a = h.finish();
-    (a, &app).hash(&mut h);
+    (a, &id).hash(&mut h);
     let b = h.finish();
     let uuid = format!(
         "{:08X}-{:04X}-{:04X}-{:04X}-{:012X}",

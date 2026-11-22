@@ -781,6 +781,9 @@ fn mbx_draw_quad(k: &mut Kernel, w: &[u32]) {
             let d = (x as f32 + 0.5 - p0.0, y as f32 + 0.5 - p0.1);
             let a = (d.0 * e2.1 - d.1 * e2.0) / det;
             let b = (e1.0 * d.1 - e1.1 * d.0) / det;
+            if !(0.0..=1.0).contains(&a) || !(0.0..=1.0).contains(&b) {
+                continue;
+            }
             let u = t0.0 + a * (t1.0 - t0.0) + b * (t2.0 - t0.0);
             let v = t0.1 + a * (t1.1 - t0.1) + b * (t2.1 - t0.1);
             let tx = ((u * norm.0) as i64).clamp(0, src.2 as i64 - 1) as u32;

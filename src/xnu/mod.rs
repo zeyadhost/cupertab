@@ -993,9 +993,10 @@ pub fn boot_firmware(
     let overlay = base.join(format!("{}_{}_data", fw.info.product_type, fw.info.build));
     let mut kernel = Kernel::boot(fw, &overlay, exe_path, vec![exe_path.to_string()])?;
     for ipa in ipas {
-        let app = installd::install_ipa(&kernel, ipa)
-            .map_err(|e| format!("Couldn't install {}: {e}", ipa.display()))?;
-        log!("xnu: installed {app}");
+        match installd::install_ipa(&kernel, ipa) {
+            Ok(app) => log!("xnu: installed {app}"),
+            Err(e) => log!("xnu: couldn't install {}: {e}", ipa.display()),
+        }
     }
     if !headless {
         kernel.window = Some(Box::new(crate::window::Window::new(

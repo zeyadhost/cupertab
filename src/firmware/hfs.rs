@@ -428,13 +428,20 @@ impl<R: ReadAt> Volume<R> {
             match c.first() {
                 Some(0xff) => out.extend_from_slice(&c[1..]),
                 Some(_) => {
-                    flate2::read::ZlibDecoder::new(c).read_to_end(out)?;
+                    // One byte more than expected is enough to tell it's wrong.
+                    let limit = (size + 1).saturating_sub(out.len()) as u64;
+                    flate2::read::ZlibDecoder::new(c)
+                        .take(limit)
+                        .read_to_end(out)?;
                 }
                 None => (),
             }
+            if out.len() > size {
+                return Err(bad("wrong size"));
+            }
             Ok(())
         };
-        let mut out = Vec::with_capacity(size);
+        let mut out = Vec::new();
         match le32(x, 4)? {
             // Inline in the attribute, stored if the first byte's low nibble
             // is 0xf.
@@ -446,6 +453,10 @@ impl<R: ReadAt> Volume<R> {
             // the data offset, then a data length, a chunk count and
             // (offset, length) pairs relative to the chunk count.
             4 => {
+                let blocks: u64 = node.rsrc.extents.iter().map(|e| e.count as u64).sum();
+                if node.rsrc.size > blocks * self.block_size {
+                    return Err(bad("resource fork larger than its extents"));
+                }
                 let mut rsrc = vec![0u8; node.rsrc.size as usize];
                 self.read_fork(&node.rsrc, &mut rsrc, 0)?;
                 let table = be32(rsrc.get(..4).ok_or_else(|| bad("truncated"))?) as usize + 4;

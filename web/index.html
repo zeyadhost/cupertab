@@ -77,7 +77,7 @@ entirely in this tab.</p>
     pendingLog += text + '\n';
   }
   var Module = {
-    touchHLEJit: new URLSearchParams(location.search).get('jit') !== 'off',
+    touchHLEJit: new URLSearchParams(location.search).get('jit') === 'on',
     canvas: document.getElementById('canvas'),
     print: log,
     printErr: log,

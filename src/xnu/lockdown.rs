@@ -192,6 +192,8 @@ struct Job {
 struct Launchd {
     jobs: Vec<Job>,
     spawns: Vec<Spawn>,
+    /// Processes of removed jobs, for the kernel to end.
+    kills: Vec<u32>,
     next_pid: u32,
 }
 
@@ -199,13 +201,18 @@ thread_local! {
     static LAUNCHD: RefCell<Launchd> = const { RefCell::new(Launchd {
         jobs: Vec::new(),
         spawns: Vec::new(),
+        kills: Vec::new(),
         // SpringBoard is 1.
         next_pid: 2,
     }) };
 }
 
 pub fn spawns_pending() -> bool {
-    LAUNCHD.with_borrow(|l| !l.spawns.is_empty())
+    LAUNCHD.with_borrow(|l| !l.spawns.is_empty() || !l.kills.is_empty())
+}
+
+pub fn take_kills() -> Vec<u32> {
+    LAUNCHD.with_borrow_mut(|l| std::mem::take(&mut l.kills))
 }
 
 pub fn take_spawns() -> Vec<Spawn> {
@@ -352,6 +359,14 @@ fn launchd_frames_with(tx: &mut Vec<u8>, rx: &mut VecDeque<u8>, l: &mut Launchd)
                 LaunchData::Errno(0)
             }
             ("RemoveJob", Some(label)) => {
+                // launchd kills a removed job's process.
+                let running = l
+                    .jobs
+                    .iter()
+                    .filter(|j| j.label == label && j.exit.is_none());
+                let pids: Vec<u32> = running.map(|j| j.pid).collect();
+                l.kills.extend(pids);
+                l.spawns.retain(|s| s.label != label);
                 l.jobs.retain(|j| j.label != label);
                 LaunchData::Errno(0)
             }

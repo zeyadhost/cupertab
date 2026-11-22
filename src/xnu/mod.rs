@@ -491,6 +491,9 @@ impl Kernel {
     /// Starts the jobs submitted to launchd since the last call, creating
     /// their Mach services first so clients can look them up right away.
     fn start_jobs(&mut self) {
+        for pid in lockdown::take_kills() {
+            self.kill_process(pid);
+        }
         for job in lockdown::take_spawns() {
             // Each process gets its own 1GiB memory window on the web, so
             // only one app runs at a time there.

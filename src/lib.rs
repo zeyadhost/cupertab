@@ -443,7 +443,10 @@ pub(crate) fn web_yield(force: bool) {
                 .is_none_or(|t| now.duration_since(t) > Duration::from_millis(50))
         });
         if force || due {
-            sleep(Duration::ZERO);
+            extern "C" {
+                fn touchhle_yield();
+            }
+            unsafe { touchhle_yield() };
             LAST_YIELD.with(|l| l.set(Some(Instant::now())));
         }
     }

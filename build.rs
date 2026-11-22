@@ -83,9 +83,9 @@ pub fn main() {
 
     // libc++_shared.so has to be copied into the APK. See README of cargo-ndk.
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "emscripten" {
-        let jit_js = package_root.join("web/jit.js");
-        rerun_if_changed(&jit_js);
-        println!("cargo:rustc-link-arg=--js-library={}", jit_js.display());
+        let runtime_js = package_root.join("web/runtime.js");
+        rerun_if_changed(&runtime_js);
+        println!("cargo:rustc-link-arg=--js-library={}", runtime_js.display());
 
         // gl4es provides OpenGL 2.1 on top of WebGL; web/build.sh builds it.
         let gl4es_lib = std::env::var("TOUCHHLE_GL4ES_LIB_DIR").map_or_else(

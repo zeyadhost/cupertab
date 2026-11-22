@@ -27,7 +27,6 @@ const NOTIFY_STATUS_OK: u32 = 0;
 const NOTIFY_STATUS_INVALID_TOKEN: u32 = 2;
 
 enum Delivery {
-    Plain,
     Check { changed: bool },
     MachPort { port: u32, client_token: u32 },
 }
@@ -163,7 +162,6 @@ pub fn msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
                     &mut Delivery::MachPort { port, client_token } => {
                         sends.push((port, client_token))
                     }
-                    Delivery::Plain => (),
                 }
             }
             for (port, client_token) in sends {
@@ -179,7 +177,7 @@ pub fn msg(k: &mut Kernel, msg: &[u8]) -> Option<Vec<u8>> {
         }
         // _notify_server_register_plain(name, &token, &status)
         1 => {
-            let token = n.register(name, Delivery::Plain);
+            let token = n.register(name, Delivery::Check { changed: true });
             vec![KERN_SUCCESS, token, NOTIFY_STATUS_OK]
         }
         // _notify_server_register_check(name, &size, &slot, &token, &status)

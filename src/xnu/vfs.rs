@@ -63,12 +63,19 @@ pub struct UserEvent {
     pub triggered: bool,
 }
 
-/// A POSIX shared memory object. Every mapping of it in the one guest
-/// process shares the same pages.
+/// A POSIX shared memory object's contents while it isn't mapped.
 #[derive(Default)]
 pub struct Shm {
-    pub size: u64,
-    pub addr: Option<u32>,
+    pub data: Vec<u8>,
+}
+
+/// A live mapping of a shared memory object. Mappings that fit share one
+/// region, since the guest is a single process.
+pub struct ShmMap {
+    pub addr: u32,
+    pub len: u32,
+    pub refs: u32,
+    pub shm: std::rc::Rc<std::cell::RefCell<Shm>>,
 }
 
 pub enum FileKind {
@@ -107,6 +114,7 @@ pub struct Vfs {
     deleted: std::collections::HashSet<String>,
     /// Shared memory objects by `shm_open` name.
     pub shm: HashMap<String, std::rc::Rc<std::cell::RefCell<Shm>>>,
+    pub shm_maps: Vec<ShmMap>,
 }
 
 pub enum Resolved<'a> {
@@ -154,6 +162,7 @@ impl Vfs {
             cwd: "/".into(),
             deleted: Default::default(),
             shm: HashMap::new(),
+            shm_maps: Vec::new(),
         }
     }
 
@@ -491,7 +500,7 @@ impl Vfs {
             FileKind::Shm(shm) => Ok(Stat {
                 mode: 0o100600,
                 ino: 2000,
-                size: shm.borrow().size,
+                size: shm.borrow().data.len() as u64,
                 uid: 501,
                 gid: 501,
                 mtime: 0,

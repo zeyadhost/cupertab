@@ -209,11 +209,14 @@ impl Kernel {
         size: u32,
         prot: u32,
     ) -> Ret {
-        let size = size.max(round_up(shm.borrow().size.min(u32::MAX as u64) as u32));
-        if let Some(addr) = shm.borrow().addr {
-            if !self.vm.is_free(addr, 1) {
-                return ok(addr);
-            }
+        if let Some(m) = self
+            .vfs
+            .shm_maps
+            .iter_mut()
+            .find(|m| std::rc::Rc::ptr_eq(&m.shm, &shm) && m.len >= size)
+        {
+            m.refs += 1;
+            return ok(m.addr);
         }
         let Some(base) = self
             .vm
@@ -222,8 +225,26 @@ impl Kernel {
             return Ret::Err(ENOMEM);
         };
         write_bytes(&mut self.mem, base, &vec![0u8; size as usize]);
-        shm.borrow_mut().addr = Some(base);
+        {
+            let data = &shm.borrow().data;
+            let n = data.len().min(size as usize);
+            write_bytes(&mut self.mem, base, &data[..n]);
+        }
+        self.vfs.shm_maps.push(vfs::ShmMap {
+            addr: base,
+            len: size,
+            refs: 1,
+            shm,
+        });
         ok(base)
+    }
+
+    /// Copies a shared memory mapping back into its object and forgets it.
+    fn shm_unmapped(&mut self, i: usize) {
+        let m = self.vfs.shm_maps.remove(i);
+        let mut shm = m.shm.borrow_mut();
+        let n = shm.data.len().min(m.len as usize);
+        shm.data[..n].copy_from_slice(&read_bytes(&self.mem, m.addr, n as u32));
     }
 
     fn mmap(&mut self) -> Ret {
@@ -260,6 +281,16 @@ impl Kernel {
         } else {
             None
         };
+        if flags & MAP_FIXED != 0 {
+            while let Some(i) = self
+                .vfs
+                .shm_maps
+                .iter()
+                .position(|m| m.addr < addr.saturating_add(size) && addr < m.addr + m.len)
+            {
+                self.shm_unmapped(i);
+            }
+        }
         let base = if flags & MAP_FIXED != 0 {
             if self
                 .vm
@@ -531,11 +562,15 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         60 => ok(0o022),
         73 => {
-            // Shared memory keeps its pages, so the next mapping sees what
-            // was written to it.
-            if !k.vfs.shm.values().any(|s| s.borrow().addr == Some(args[0])) {
-                k.vm.unmap(args[0], args[1]);
+            if let Some(i) = k.vfs.shm_maps.iter().position(|m| m.addr == args[0]) {
+                let m = &mut k.vfs.shm_maps[i];
+                m.refs -= 1;
+                if m.refs > 0 {
+                    return ok(0);
+                }
+                k.shm_unmapped(i);
             }
+            k.vm.unmap(args[0], args[1]);
             ok(0)
         }
         74 => {
@@ -659,8 +694,8 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         201 => {
             let len = args[1] as u64 | (args[2] as u64) << 32;
             match k.vfs.fds.get(&args[0]).map(|f| &f.kind) {
-                Some(FileKind::Shm(shm)) => {
-                    shm.borrow_mut().size = len;
+                Some(FileKind::Shm(shm)) if len <= 1 << 28 => {
+                    shm.borrow_mut().data.resize(len as usize, 0);
                     ok(0)
                 }
                 Some(FileKind::Host(file)) => match file.set_len(len) {

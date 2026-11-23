@@ -179,6 +179,7 @@ entirely in this tab.</p>
     try { Module.FS.mkdir(dir); } catch (e) {}
     Module.FS.writeFile(path, data, { canOwn: true });
     const booting = dir === '/touchHLE_ipsw';
+    Module['touchHLEFirmware'] = booting;
     if (booting) {
       const persistent = await restoreRootfsCache(data);
       window.touchHLEFirmwareReady = (extracted) => {
@@ -194,8 +195,8 @@ entirely in this tab.</p>
       ? 'Preparing firmware…'
       : 'Running ' + file.name;
     if (booting) {
-      // Use timer yields during drags. After release, avoid the browser's
-      // nested timer delay while the guest unlocks or opens an app.
+      // For browsers without message-channel yields, use fast scheduling
+      // after release while the guest unlocks or opens an app.
       Module.canvas.addEventListener('pointerdown', (event) => {
         if (event.isPrimary) Module['touchHLEFastUntil'] = 0;
       });

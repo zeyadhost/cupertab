@@ -5,8 +5,22 @@
  */
 
 addToLibrary({
+  $touchHLEChannel: null,
   touchhle_yield__async: 'auto',
+  touchhle_yield__deps: ['$touchHLEChannel'],
   touchhle_yield: () => {
+    if (Module['touchHLEFirmware'] && document.visibilityState === 'visible' &&
+        typeof MessageChannel === 'function') {
+      // Yield to browser input without incurring the nested timer delay.
+      touchHLEChannel ??= new MessageChannel();
+      return new Promise((resolve) => {
+        touchHLEChannel.port1.onmessage = () => {
+          touchHLEChannel.port1.onmessage = null;
+          resolve();
+        };
+        touchHLEChannel.port2.postMessage(null);
+      });
+    }
     if (globalThis.scheduler?.yield &&
         document.visibilityState === 'visible' &&
         (Module['touchHLEFastStart'] || performance.now() < Module['touchHLEFastUntil'])) {

@@ -160,6 +160,19 @@ impl Kernel {
         // SpringBoard's launch watchdog, as when debugging on a device.
         if exe_path.ends_with("/SpringBoard") {
             argv.extend(["-SBNoWatchdogs".to_string(), "YES".to_string()]);
+            if cfg!(target_os = "emscripten") {
+                // On the web, loading an app blocks input and evicts the
+                // previous app. Start Phone and Mail only when requested.
+                argv.extend(
+                    [
+                        "-SBDisablePhoneAutoLaunch",
+                        "YES",
+                        "-SBDisableMailAutoLaunch",
+                        "YES",
+                    ]
+                    .map(str::to_owned),
+                );
+            }
         }
         let vfs = vfs::Vfs::new(overlay_dir);
         let shared_cache = Self::read_fw_file(&fw, SHARED_CACHE_PATH)?;

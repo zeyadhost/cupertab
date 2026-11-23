@@ -7,9 +7,10 @@
 //!
 //! An IPSW is a zip archive. Its `Restore.plist` names the root filesystem
 //! image, which is an `encrcdsa`-encrypted UDIF disk image containing an
-//! HFSX volume. Nothing from the firmware is bundled with touchHLE: the user
-//! supplies the IPSW, and the root filesystem is extracted from it into the
-//! user data directory on first use.
+//! HFSX volume. Nothing from the firmware, and no decryption key, is bundled
+//! with touchHLE: the user supplies the IPSW and its root filesystem key, and
+//! the root filesystem is extracted from it into the user data directory on
+//! first use.
 
 mod crypt;
 pub mod hfs;
@@ -67,27 +68,6 @@ impl ReadAt for FileReadAt {
         Ok(done)
     }
 }
-
-/// Root filesystem keys for IPSWs whose root filesystem images are
-/// encrypted. These keys are published by the iOS research community
-/// (e.g. via the ipsw.me API); the encrypted images themselves are not.
-const ROOTFS_KEYS: &[(&str, &str, &str)] = &[
-    (
-        "iPhone1,2",
-        "8A293",
-        "09e054a8dd6c11c7f41ad9e614a8d564aa7d0c653585f29c0b07d1f0a1e1dc0040624a16",
-    ),
-    (
-        "iPhone1,2",
-        "8B117",
-        "4c3c83d3899ea9bef415b1c9c656aaef966b2362494d2c9093a9283d388257562a228c86",
-    ),
-    (
-        "iPhone1,2",
-        "8C148",
-        "82c9280927224637c77a96a26d22f42f2ca08fa9a798a8d06fbc8202fc83ec7f45dda79e",
-    ),
-];
 
 fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
     if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -167,7 +147,8 @@ pub struct Firmware {
 
 impl Firmware {
     /// Opens the root filesystem of an IPSW, extracting the image into
-    /// `cache_dir` the first time. `key` overrides the built-in key table.
+    /// `cache_dir` the first time. `key` is the root filesystem key, which
+    /// encrypted images need.
     pub fn open(ipsw_path: &Path, cache_dir: &Path, key: Option<&str>) -> Result<Self, String> {
         let info = read_ipsw_info(ipsw_path)?;
         log!(
@@ -188,25 +169,30 @@ impl Firmware {
         let mut magic = [0u8; 8];
         file.read_exact_at(&mut magic, 0)
             .map_err(|e| e.to_string())?;
-        let (image, len): (Box<dyn ReadAt>, u64) = if &magic == b"encrcdsa" {
-            let key = match key {
-                Some(key) => key.to_string(),
-                None => ROOTFS_KEYS
-                    .iter()
-                    .find(|(p, b, _)| *p == info.product_type && *b == info.build)
-                    .map(|(_, _, k)| k.to_string())
-                    .ok_or(format!(
-                        "No root filesystem key known for {} {}",
-                        info.product_type, info.build
-                    ))?,
-            };
-            let image = crypt::EncryptedImage::new(file, &parse_hex(&key)?)?;
+        let encrypted = &magic == b"encrcdsa";
+        let (image, len): (Box<dyn ReadAt>, u64) = if encrypted {
+            let key = key.ok_or(format!(
+                "The root filesystem of {} {} is encrypted, and touchHLE ships no Apple \
+                 decryption keys. Provide the root filesystem key for your own firmware \
+                 (72 hex digits) with --rootfs-key=KEY, or in the key field of the web page.",
+                info.product_type, info.build
+            ))?;
+            let image = crypt::EncryptedImage::new(file, &parse_hex(key)?)?;
             let len = image.len();
             (Box::new(image), len)
         } else {
             (Box::new(file), len)
         };
-        let udif = udif::UdifImage::new(image, len)?;
+        let udif = udif::UdifImage::new(image, len).map_err(|e| {
+            if encrypted {
+                format!(
+                    "The root filesystem key does not fit {} {} ({e})",
+                    info.product_type, info.build
+                )
+            } else {
+                e
+            }
+        })?;
         let partition = udif
             .partitions
             .iter()

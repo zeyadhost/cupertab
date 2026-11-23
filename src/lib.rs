@@ -122,8 +122,9 @@ Special options:
         touchHLE_firmware directory on first use.
 
     --rootfs-key=KEY
-        Root filesystem key (72 hex digits) to use with --firmware-info, for
-        IPSWs touchHLE does not know the key of.
+        Root filesystem key (72 hex digits) to use with --firmware-info and
+        --boot-firmware. touchHLE ships no Apple decryption keys, so an IPSW
+        with an encrypted root filesystem needs the key for that firmware.
 ";
 
 pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {

@@ -12,6 +12,9 @@
   p { margin: 0; max-width: 640px; text-align: center; color: #aaa; }
   a { color: #8cf; }
   #picker { display: flex; gap: 12px; align-items: center; }
+  #key-row { display: flex; gap: 8px; align-items: center; }
+  #rootfs-key { width: 42ch; background: #222; color: #ddd; border: 1px solid #444; border-radius: 6px;
+                padding: 6px 8px; font: 13px ui-monospace, monospace; }
   label.button { background: #2a6; color: #fff; padding: 10px 18px; border-radius: 8px; cursor: pointer; }
   label.button.disabled { background: #444; cursor: default; }
   #canvas { background: #000; display: none; outline: none; }
@@ -30,6 +33,13 @@ high-level emulator for iPhone OS 2.x&ndash;4.0 apps. Pick an <code>.ipa</code> 
 iPhone OS 4 <code>.ipsw</code> to boot Apple's own SpringBoard from it. To put apps on its home
 screen, add their <code>.ipa</code> files before booting. Files stay on your machine and run
 entirely in this tab.</p>
+<p>touchHLE-web ships no Apple firmware and no decryption keys. To boot an <code>.ipsw</code>,
+enter the root filesystem key for your own firmware. This browser remembers it after a boot.</p>
+<div id="key-row">
+  <label for="rootfs-key">Root filesystem key</label>
+  <input id="rootfs-key" type="text" placeholder="72 hex digits for your .ipsw" autocomplete="off"
+         spellcheck="false">
+</div>
 <div id="picker">
   <label class="button disabled" id="pick-label">Loading&hellip;
     <input type="file" id="ipa" accept=".ipa,.zip" hidden disabled>
@@ -62,6 +72,11 @@ entirely in this tab.</p>
   const ipswLabel = document.getElementById('ipsw-label');
   const installInput = document.getElementById('install');
   const installLabel = document.getElementById('install-label');
+  const keyInput = document.getElementById('rootfs-key');
+  const keyStorage = 'touchHLE-web-rootfs-key';
+  try { keyInput.value = localStorage.getItem(keyStorage) || ''; } catch (e) {}
+  const enteredKey = () => keyInput.value.replace(/\s+/g, '');
+  let firmwareReady = false;
   // Lines are batched into one DOM update per frame, since touchHLE can log
   // hundreds of lines a second and each update re-lays out the page.
   let pendingLog = '';
@@ -112,6 +127,10 @@ entirely in this tab.</p>
     label.addEventListener('click', (e) => { e.preventDefault(); location.reload(); });
   }
   window.touchHLEExited = (code) => {
+    if (code !== 0 && Module['touchHLEFirmware'] && !firmwareReady) {
+      stopped('touchHLE could not open this IPSW. Check that the root filesystem key is the one for this firmware');
+      return;
+    }
     stopped(code === 0 ? 'touchHLE exited' : 'touchHLE could not run this file');
   };
   window.addEventListener('error', (e) => { stopped('touchHLE crashed: ' + e.message); });
@@ -170,6 +189,7 @@ entirely in this tab.</p>
     input.disabled = true;
     ipswInput.disabled = true;
     installInput.disabled = true;
+    keyInput.disabled = true;
     label.classList.add('disabled');
     ipswLabel.classList.add('disabled');
     installLabel.classList.add('disabled');
@@ -183,6 +203,8 @@ entirely in this tab.</p>
     if (booting) {
       const persistent = await restoreRootfsCache(data);
       window.touchHLEFirmwareReady = (extracted) => {
+        firmwareReady = true;
+        try { localStorage.setItem(keyStorage, enteredKey()); } catch (e) {}
         Module.FS.unlink(path);
         Module['touchHLEFastStart'] = true;
         statusEl.textContent = 'Starting SpringBoard…';
@@ -233,6 +255,14 @@ entirely in this tab.</p>
   });
   ipswInput.addEventListener('change', async () => {
     if (!ipswInput.files[0]) return;
+    const key = enteredKey();
+    if (!/^[0-9a-fA-F]{72}$/.test(key)) {
+      statusEl.textContent = 'touchHLE-web ships no Apple decryption keys. Enter the root filesystem ' +
+        'key for your own firmware (72 hex digits), then choose the .ipsw again.';
+      ipswInput.value = '';
+      keyInput.focus();
+      return;
+    }
     const installs = [];
     try { Module.FS.mkdir('/touchHLE_install'); } catch (e) {}
     for (const ipa of installInput.files) {
@@ -240,7 +270,8 @@ entirely in this tab.</p>
       Module.FS.writeFile(path, new Uint8Array(await ipa.arrayBuffer()));
       installs.push('--install-ipa=' + path);
     }
-    launch(ipswInput.files[0], '/touchHLE_ipsw', (path) => ['--boot-firmware=' + path, ...installs]);
+    launch(ipswInput.files[0], '/touchHLE_ipsw',
+      (path) => ['--boot-firmware=' + path, '--rootfs-key=' + key, ...installs]);
   });
 </script>
 <script src="touchHLE.data.js"></script>

@@ -1,4 +1,6 @@
 > **Web build:** this fork also runs touchHLE in the browser at https://zeyadhost.github.io/touchHLE-web/ (pick an `.ipa` you own). See [web/README.md](web/README.md).
+>
+> It can also boot iOS 4 from your own `.ipsw`. touchHLE-web ships no Apple firmware and no decryption keys: you must provide the root filesystem key for your own firmware.
 
 # touchHLE: high-level emulator for early iOS apps
 

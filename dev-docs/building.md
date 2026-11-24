@@ -2,7 +2,7 @@
 
 ## Platform support
 
-A list of supported target platforms (platforms you can build touchHLE _for_) can be found in `README.md`. However, that's not the whole story, because you should also know supported host platforms when building (platforms you can build touchHLE _on_).
+A list of supported target platforms (platforms you can build touchHLE _for_) can be found in [upstream touchHLE's README](https://github.com/touchHLE/touchHLE#platform-support). However, that's not the whole story, because you should also know supported host platforms when building (platforms you can build touchHLE _on_).
 
 Things tend to be easiest when the target and host platforms are the same. When they aren't the same, it's called “cross-compilation”.
 

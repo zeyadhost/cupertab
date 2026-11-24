@@ -32,7 +32,11 @@ The only firmware tested so far is iOS 4.2.1 for the iPhone 3G (iPhone1,2, build
 
 The screen stays black while it boots, so watch the status line above it. The Home button under the screen, or the Home key on your keyboard, presses the iPhone's Home button. If SpringBoard turns the screen off, tap it or press Home. Only one app runs at a time, so opening an app closes the one before it.
 
-The first boot unpacks the root filesystem image from the IPSW and saves it in the browser's site storage. It keeps one image, from the last IPSW. If you pick the same IPSW again, the page skips that step. The saved image is still encrypted, so every boot needs the key. Once the key opens the firmware, the page remembers it. The page also saves the decrypted dyld shared cache from that image, so later boots skip decrypting and inflating it (about 170 MB, a few seconds of work). Clearing the site's data removes all of it.
+The first boot unpacks the root filesystem image from the IPSW and saves it in the browser's site storage. It keeps one image, from the last IPSW. If you pick the same IPSW again, the page skips that step. The saved image is still encrypted, so every boot needs the key. Once the key opens the firmware, the page remembers it. The page also saves the decrypted dyld shared cache from that image, so later boots skip decrypting and inflating it (about 170 MB, a few seconds of work).
+
+When a boot reaches the lock screen, the page also saves a snapshot of it. The next time you pick the same IPSW with the same key, the page starts from that snapshot, so the lock screen shows up in under a second instead of after a full boot. If the snapshot can't be used (it's damaged, from another build, or slow to read), the page deletes it, boots normally, and saves a new one. The same happens when iOS has changed its saved files since the snapshot was taken. To turn snapshots off, add `?snapshot=off` to the address.
+
+Everything the page saves (the root filesystem image, the decrypted shared cache, iOS's own saved files and the snapshot) stays in your browser's site storage and is never uploaded. The "Clear saved data" link deletes all of it, and so does clearing the site's data.
 
 ## The JIT
 

@@ -874,7 +874,17 @@ pub fn boot(fw: Firmware, overlay: &Path, exe_path: &str) -> Result<Kernel, Stri
                     );
                     return Ok(k);
                 }
-                Err(fw) => *fw,
+                Err(fw) => {
+                    extern "C" {
+                        fn emscripten_run_script(script: *const std::ffi::c_char);
+                    }
+                    // The page deletes the snapshot and puts back the data
+                    // partition, which restore() may have removed.
+                    unsafe {
+                        emscripten_run_script(c"globalThis.touchHLESnapshotFailed?.()".as_ptr())
+                    };
+                    *fw
+                }
             }
         }
         Err(_) => fw,

@@ -158,7 +158,8 @@ enter the root filesystem key for your own firmware. This browser remembers it a
   const build = '@TOUCHHLE_BUILD@';
   const savedCaches = ['touchHLE-web-rootfs-v1', 'touchHLE-web-snapshot-v1'];
   const clearButton = document.getElementById('clear');
-  caches.keys().then((names) => { clearButton.hidden = !names.some((name) => savedCaches.includes(name)); })
+  (globalThis.caches ? caches.keys() : Promise.resolve([]))
+    .then((names) => { clearButton.hidden = !names.some((name) => savedCaches.includes(name)); })
     .catch(() => {});
   clearButton.addEventListener('click', async () => {
     clearButton.disabled = true;
@@ -252,6 +253,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         const buffer = await take(dataKey.href + ' ' + digest, readSaved(dataKey, digest));
         if (!buffer) return null;
         try { unpackDir(buffer); } catch (e) { log('Could not restore the data partition.'); return null; }
+        savedDataPartition = buffer;
         return sha256(buffer);
       };
       const [rootfs, , data] = await Promise.all([
@@ -335,9 +337,12 @@ enter the root filesystem key for your own firmware. This browser remembers it a
       headers: { [rootfsDigestHeader]: id }
     }));
   }
-  // ?snapshot=save boots and keeps the lock screen in this browser's storage;
-  // ?snapshot=restore starts from it when the same IPSW and key are picked.
-  const snapshotMode = new URLSearchParams(location.search).get('snapshot');
+  // A boot that reaches the lock screen keeps it in this browser's storage, and
+  // the next boot with the same IPSW and key starts from it. ?snapshot=save
+  // only keeps it, and ?snapshot=off does neither.
+  const snapshotParam = new URLSearchParams(location.search).get('snapshot');
+  const snapshotMode = snapshotParam === 'off' ? null : snapshotParam === 'save' ? 'save' : 'restore';
+  let savedDataPartition = null;
   const snapshotDir = '/touchHLE-snapshot';
   const snapshotKey = new URL('snapshot-v1', document.baseURI);
   const snapshotIdHeader = 'X-TouchHLE-Snapshot';
@@ -347,8 +352,13 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     const id = await snapshotId(digest, key);
     const saved = await (await caches.open('touchHLE-web-snapshot-v1')).match(snapshotKey);
     if (saved?.headers.get(snapshotIdHeader) !== id) return null;
-    const raw = await new Response(saved.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
-    return { raw, data: saved.headers.get(snapshotDataHeader) };
+    try {
+      const raw = await new Response(saved.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+      return { raw, data: saved.headers.get(snapshotDataHeader) };
+    } catch (e) {
+      log('snapshot: the saved snapshot is damaged; booting.');
+      return null;
+    }
   };
   try {
     const last = localStorage.getItem(lastIpswStorage);
@@ -365,24 +375,37 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     Module.FS.mkdir(snapshotDir);
     // The snapshot holds its own copy of the data partition, so it only fits
     // while the saved partition is still that copy.
+    // Any snapshot this boot can't use is deleted, and this boot saves a new
+    // one when it reaches the lock screen.
     if (saved && saved.data === data) {
       Module.FS.writeFile(snapshotDir + '/restore.bin', new Uint8Array(saved.raw), { canOwn: true });
       log(`snapshot: read ${saved.raw.byteLength >> 20} MiB`);
-    } else if (saved) {
-      log('snapshot: the data partition changed since the snapshot; booting.');
+    } else {
+      if (saved) log('snapshot: the data partition changed since the snapshot; booting.');
+      cache.delete(snapshotKey).catch(() => {});
     }
     Module.FS.writeFile(snapshotDir + '/save', '');
+    // touchHLE calls this when it can't restore the snapshot. It may have
+    // removed the data partition by then, so put the saved one back.
+    window.touchHLESnapshotFailed = () => {
+      cache.delete(snapshotKey).catch(() => {});
+      try {
+        if (savedDataPartition) unpackDir(savedDataPartition);
+      } catch (e) {
+        log('Could not restore the data partition.');
+      }
+    };
     window.touchHLESnapshotSave = async (ptr, len) => {
       const start = performance.now();
-      const raw = new Blob([HEAPU8.subarray(ptr, ptr + len)]);
       try {
+        const raw = new Blob([HEAPU8.subarray(ptr, ptr + len)]);
         const disk = packDir(dataDir);
         const packed = await new Response(raw.stream().pipeThrough(new CompressionStream('gzip'))).blob();
         const headers = { [snapshotIdHeader]: id, [snapshotDataHeader]: await sha256(await disk.arrayBuffer()) };
         await cache.put(snapshotKey, new Response(packed, { headers }));
         log(`snapshot: stored ${packed.size >> 20} MiB in ${Math.round(performance.now() - start)} ms`);
       } catch (e) {
-        log('Could not save the snapshot: ' + e.message);
+        log('snapshot: not saved (' + e.name + ')');
       }
     };
   }
@@ -401,8 +424,14 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     const digesting = booting && ipswDigest(file);
     const key = enteredKey();
     const restoring = booting && restoreRootfsCache(digesting);
-    const reading = snapshotting && snapshotMode === 'restore' &&
-      digesting.then((digest) => take(['snapshot', digest, key].join(' '), readSnapshot(digest, key))).catch(() => null);
+    const reading = snapshotting && snapshotMode === 'restore' && digesting.then((digest) => Promise.race([
+      take(['snapshot', digest, key].join(' '), readSnapshot(digest, key)),
+      new Promise((resolve) => setTimeout(resolve, 5000, 'slow'))
+    ])).then((saved) => {
+      if (saved !== 'slow') return saved;
+      log('snapshot: reading it took too long; booting.');
+      return null;
+    }).catch(() => null);
     const persistent = booting && await restoring;
     const data = persistent?.rootfs && await ipswStub(file).catch(() => null) || new Uint8Array(await file.arrayBuffer());
     const path = dir + '/' + file.name.replace(/[^A-Za-z0-9._-]/g, '_');

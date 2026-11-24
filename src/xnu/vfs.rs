@@ -81,6 +81,16 @@ pub struct ShmMap {
     pub shm: std::rc::Rc<std::cell::RefCell<Shm>>,
 }
 
+/// A writable `MAP_SHARED` mapping of a host file. Each process has its own
+/// memory here, so the pages go back to the file when they are unmapped.
+pub struct FileMap {
+    pub pid: u32,
+    pub addr: u32,
+    pub len: u32,
+    pub offset: u64,
+    pub file: std::fs::File,
+}
+
 pub enum FileKind {
     Firmware {
         node: u32,
@@ -157,6 +167,7 @@ pub struct Vfs {
     /// Shared memory objects by `shm_open` name.
     pub shm: HashMap<String, std::rc::Rc<std::cell::RefCell<Shm>>>,
     pub shm_maps: Vec<ShmMap>,
+    pub file_maps: Vec<FileMap>,
     #[cfg(target_os = "emscripten")]
     mapping_cache: MappingCache,
 }
@@ -212,6 +223,7 @@ impl Vfs {
             deleted: Default::default(),
             shm: HashMap::new(),
             shm_maps: Vec::new(),
+            file_maps: Vec::new(),
             #[cfg(target_os = "emscripten")]
             mapping_cache: MappingCache::default(),
         }

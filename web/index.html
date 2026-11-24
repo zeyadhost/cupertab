@@ -149,7 +149,9 @@ enter the root filesystem key for your own firmware. This browser remembers it a
   // The guest's data partition, kept between page loads as the native build
   // keeps it on disk. Without it, every boot is a first boot.
   const dataDir = '/touchHLE_firmware';
-  const dataKey = new URL('data-partition-v1', document.baseURI);
+  // v1 partitions hold zero-filled keyboard images from before shared file
+  // mappings were written back.
+  const dataKey = new URL('data-partition-v2', document.baseURI);
   const rootfsDigestHeader = 'X-TouchHLE-IPSW-Digest';
   // web/build.sh puts a hash of touchHLE.wasm here. Files touchHLE decoded
   // are only reused by the build that decoded them.
@@ -195,6 +197,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         Module.FS.writeFile(path, bytes, { canOwn: true });
       };
       const restoreData = async () => {
+        cache.delete(new URL('data-partition-v1', document.baseURI)).catch(() => {});
         const saved = await cache.match(dataKey);
         if (saved?.headers.get(rootfsDigestHeader) !== digest) return;
         const buffer = await saved.arrayBuffer();

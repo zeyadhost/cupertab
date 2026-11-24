@@ -10,6 +10,7 @@ use super::vfs::{self, FileKind, OpenFile, Stat};
 use super::vm::{round_up, Prot};
 use super::{read_bytes, read_cstr, read_u32, write_bytes, write_u32, Kernel};
 use crate::mem::Ptr;
+use std::io::{Seek, SeekFrom, Write};
 
 pub enum Ret {
     Ok(u32, u32),
@@ -370,9 +371,9 @@ impl Kernel {
         ok(base)
     }
 
-    /// Writes back and forgets the shared memory mappings overlapping a range
-    /// that is about to be unmapped or replaced.
-    fn shm_forget(&mut self, addr: u32, size: u32) {
+    /// Writes back and forgets the shared memory and shared file mappings
+    /// overlapping a range that is about to be unmapped or replaced.
+    fn shared_forget(&mut self, addr: u32, size: u32) {
         let end = addr.saturating_add(size);
         while let Some(i) = self
             .vfs
@@ -381,6 +382,22 @@ impl Kernel {
             .position(|m| m.pid == self.pid && m.addr < end && addr < m.addr + m.len)
         {
             self.shm_unmapped(i);
+        }
+        while let Some(i) = self
+            .vfs
+            .file_maps
+            .iter()
+            .position(|m| m.pid == self.pid && m.addr < end && addr < m.addr + m.len)
+        {
+            let mut m = self.vfs.file_maps.remove(i);
+            // Bytes past the end of the file are not written back.
+            let file_len = m.file.metadata().map_or(0, |meta| meta.len());
+            let n = file_len.saturating_sub(m.offset).min(m.len as u64) as u32;
+            let bytes = read_bytes(&self.mem, m.addr, n);
+            let _ = m
+                .file
+                .seek(SeekFrom::Start(m.offset))
+                .and_then(|_| m.file.write_all(&bytes));
         }
     }
 
@@ -405,8 +422,10 @@ impl Kernel {
             self.arg(4),
         );
         let offset = self.arg(5) as u64 | (self.arg(6) as u64) << 32;
+        const MAP_SHARED: u32 = 0x1;
         const MAP_FIXED: u32 = 0x10;
         const MAP_ANON: u32 = 0x1000;
+        const PROT_WRITE: u32 = 0x2;
         if len == 0 {
             return Ret::Err(EINVAL);
         }
@@ -430,7 +449,7 @@ impl Kernel {
             None
         };
         if flags & MAP_FIXED != 0 {
-            self.shm_forget(addr, size);
+            self.shared_forget(addr, size);
         }
         let base = if flags & MAP_FIXED != 0 {
             if self
@@ -462,6 +481,19 @@ impl Kernel {
         padding.fill(0);
         if contents.is_some() {
             self.cpu.invalidate_cache_range(base, size);
+        }
+        if flags & MAP_SHARED != 0 && prot & PROT_WRITE != 0 {
+            if let Some(FileKind::Host(file)) = self.vfs.fds.get(&fd).map(|f| &f.kind) {
+                if let Ok(file) = file.try_clone() {
+                    self.vfs.file_maps.push(vfs::FileMap {
+                        pid: self.pid,
+                        addr: base,
+                        len,
+                        offset,
+                        file,
+                    });
+                }
+            }
         }
         ok(base)
     }
@@ -772,7 +804,7 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
                 m.refs -= 1;
                 return ok(0);
             }
-            k.shm_forget(args[0], args[1]);
+            k.shared_forget(args[0], args[1]);
             k.vm.unmap(args[0], args[1]);
             ok(0)
         }

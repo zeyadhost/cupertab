@@ -71,7 +71,7 @@ pub struct Port {
 
 pub struct Ipc {
     pub ports: HashMap<u32, Port>,
-    next_name: u32,
+    pub(super) next_name: u32,
     pub task_port: u32,
     pub host_port: u32,
     pub bootstrap_port: u32,

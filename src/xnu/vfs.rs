@@ -159,11 +159,11 @@ impl MappingCache {
 }
 
 pub struct Vfs {
-    overlay: PathBuf,
+    pub(super) overlay: PathBuf,
     pub fds: HashMap<u32, OpenFile>,
     pub cwd: String,
     /// Firmware paths deleted or renamed away by the guest.
-    deleted: std::collections::HashSet<String>,
+    pub(super) deleted: std::collections::HashSet<String>,
     /// Shared memory objects by `shm_open` name.
     pub shm: HashMap<String, std::rc::Rc<std::cell::RefCell<Shm>>>,
     pub shm_maps: Vec<ShmMap>,

@@ -28,10 +28,10 @@ pub struct Region {
 }
 
 pub struct VmMap {
-    regions: BTreeMap<u32, Region>,
+    pub(super) regions: BTreeMap<u32, Region>,
     /// Lowest and highest (exclusive) addresses handed out by `map_anywhere`.
-    low: u32,
-    high: u32,
+    pub(super) low: u32,
+    pub(super) high: u32,
 }
 
 pub fn round_up(v: u32) -> u32 {

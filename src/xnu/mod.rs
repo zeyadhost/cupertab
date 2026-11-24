@@ -178,7 +178,7 @@ impl Kernel {
             }
         }
         let vfs = vfs::Vfs::new(overlay_dir);
-        let shared_cache = Self::read_fw_file(&fw, SHARED_CACHE_PATH)?;
+        let shared_cache = Self::read_shared_cache(&fw)?;
         let (mem, vm, cpu) =
             Self::load_image(&fw, &vfs, &shared_cache, exe_path, &argv, Vec::new())?;
 
@@ -283,6 +283,37 @@ impl Kernel {
         cpu.regs_mut()[Cpu::PC] = entry & !1;
         cpu.set_cpsr(Cpu::CPSR_USER_MODE | if entry & 1 != 0 { Cpu::CPSR_THUMB } else { 0 });
         Ok((mem, vm, cpu))
+    }
+
+    /// On the web, decrypting and inflating the shared cache takes seconds,
+    /// so the page keeps the result in site storage and gives it back here.
+    fn read_shared_cache(fw: &Firmware) -> Result<Vec<u8>, String> {
+        #[cfg(target_os = "emscripten")]
+        {
+            let saved = Path::new(crate::firmware::WEB_ROOTFS_CACHE).join("shared_cache");
+            let size = fw
+                .volume
+                .lookup(SHARED_CACHE_PATH, true)
+                .map(|node| fw.volume.size(node));
+            if let Ok(cache) = std::fs::read(&saved) {
+                let _ = std::fs::remove_file(&saved);
+                if size == Some(cache.len() as u64) {
+                    return Ok(cache);
+                }
+            }
+            let cache = Self::read_fw_file(fw, SHARED_CACHE_PATH)?;
+            if std::fs::write(&saved, &cache).is_ok() {
+                extern "C" {
+                    fn emscripten_run_script(script: *const std::ffi::c_char);
+                }
+                unsafe {
+                    emscripten_run_script(c"globalThis.touchHLESharedCacheReady?.()".as_ptr())
+                };
+            }
+            Ok(cache)
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        Self::read_fw_file(fw, SHARED_CACHE_PATH)
     }
 
     fn read_fw_file(fw: &Firmware, path: &str) -> Result<Vec<u8>, String> {

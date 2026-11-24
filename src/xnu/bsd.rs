@@ -841,6 +841,15 @@ pub fn syscall(k: &mut Kernel, num: u32, args_from: usize) -> Ret {
         }
         136 => res(k.vfs.mkdir(&k.fw, &k.path_arg(0)).map(|_| 0)),
         137 => res(k.vfs.unlink(&k.fw, &k.path_arg(0)).map(|_| 0)),
+        142 => {
+            // gethostuuid(uuid, timeout): one fixed ID for the emulated device.
+            const HOST_UUID: [u8; 16] = [
+                0x31, 0xc1, 0x7c, 0x06, 0x7a, 0xb5, 0x4e, 0xd6, 0xa4, 0xd7, 0xa8, 0xbf, 0xdd, 0x2f,
+                0xf3, 0x29,
+            ];
+            write_bytes(&mut k.mem, args[0], &HOST_UUID);
+            ok(0)
+        }
         153 | 414 => {
             let off = args[3] as u64 | (args[4] as u64) << 32;
             k.do_read(args[0], args[1], args[2], Some(off))

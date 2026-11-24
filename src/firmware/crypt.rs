@@ -10,7 +10,7 @@
 //! The IV for chunk `n` is the first 16 bytes of HMAC-SHA1(hmac_key, n).
 
 use super::{be32, be64, ReadAt};
-use aes::cipher::{BlockDecryptMut, KeyIvInit};
+use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use hmac::{Hmac, Mac};
 use std::cell::RefCell;
 use std::io;
@@ -71,10 +71,9 @@ impl<R: ReadAt> EncryptedImage<R> {
         let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&self.hmac_key).unwrap();
         mac.update(&(index as u32).to_be_bytes());
         let iv: [u8; 16] = mac.finalize().into_bytes()[0..16].try_into().unwrap();
-        let mut dec = Aes128CbcDec::new(&self.aes_key.into(), &iv.into());
-        for block in buf.as_chunks_mut::<16>().0 {
-            dec.decrypt_block_mut(block.into());
-        }
+        Aes128CbcDec::new(&self.aes_key.into(), &iv.into())
+            .decrypt_padded_mut::<NoPadding>(&mut buf)
+            .map_err(|_| io::Error::other("Bad encrcdsa chunk"))?;
         Ok(buf)
     }
 }

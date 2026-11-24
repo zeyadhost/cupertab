@@ -142,6 +142,9 @@ pub struct Kernel {
     /// Shows the LCD's surface, when booted with a window.
     pub window: Option<Box<crate::window::Window>>,
     pub last_present: std::time::Instant,
+    /// The surface ID and bytes the window shows, so an unchanged frame is
+    /// not drawn again.
+    shown: Option<(u32, Vec<u8>)>,
     next_tid: u64,
     /// The running process. SpringBoard is 1.
     pub pid: u32,
@@ -214,6 +217,7 @@ impl Kernel {
             yield_requested: false,
             window: None,
             last_present: std::time::Instant::now(),
+            shown: None,
             next_tid: 1,
             pid: 1,
             parked: Default::default(),
@@ -756,9 +760,13 @@ impl Kernel {
             .checked_sub(1)
             .and_then(|i| self.iokit.surfaces.get(i as usize))
         else {
+            if self.shown.as_ref().is_some_and(|(shown, _)| *shown == 0) {
+                return;
+            }
             // With no surface the LCD shows its black background.
             let black = crate::image::Image::from_pixel_vec(vec![0, 0, 0, 255], (1, 1));
             window.display_image(black);
+            self.shown = Some((0, Vec::new()));
             return;
         };
         if s.bytes_per_element != 4 {
@@ -771,6 +779,17 @@ impl Kernel {
         } else {
             return;
         };
+        let bytes = mem.bytes_at(
+            Ptr::<u8, false>::from_bits(s.addr),
+            s.height * s.bytes_per_row,
+        );
+        let shown = self.shown.get_or_insert_with(|| (0, Vec::new()));
+        if shown.0 == id && shown.1 == bytes {
+            return;
+        }
+        shown.0 = id;
+        shown.1.clear();
+        shown.1.extend_from_slice(bytes);
         let mut pixels = Vec::with_capacity((s.width * s.height * 4) as usize);
         for y in 0..s.height {
             let row = mem.bytes_at(

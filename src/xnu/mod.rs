@@ -278,6 +278,7 @@ impl Kernel {
         let sp = loader::build_stack(&mut mem, STACK_TOP, main.mach_header, argv, &envp, &apple);
 
         let mut cpu = Cpu::new(Some(&mut mem));
+        cpu.set_shared_cache(shared_cache);
         cpu.regs_mut()[Cpu::SP] = sp;
         let entry = dyld.entry;
         cpu.regs_mut()[Cpu::PC] = entry & !1;

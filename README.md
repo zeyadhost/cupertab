@@ -1,126 +1,92 @@
-> **Web build:** this fork also runs touchHLE in the browser at https://zeyadhost.github.io/touchHLE-web/ (pick an `.ipa` you own). See [web/README.md](web/README.md).
->
-> It can also boot iOS 4 from your own `.ipsw`. touchHLE-web ships no Apple firmware and no decryption keys: you must provide the root filesystem key for your own firmware.
+# touchHLE-web
 
-# touchHLE: high-level emulator for early iOS apps
+touchHLE-web is my fork of [touchHLE](https://github.com/touchHLE/touchHLE) that runs in a web browser. touchHLE is a high-level emulator for early iOS apps. It runs the app's own ARM code, and in place of iOS it uses its own versions of the system frameworks. This fork builds it to WebAssembly. It can also boot iOS 4 from an IPSW you supply, so Apple's own SpringBoard runs in the tab.
 
-**touchHLE** is a high-level emulator for early iOS apps. It runs on modern desktop operating systems and Android, and is written in Rust.
-
-touchHLE's high-level emulation (HLE) approach differs from low-level emulation (LLE) in that it does not directly simulate the iPhone/iPod touch hardware. Instead of running iOS inside emulation, touchHLE _itself_ takes the place of iOS and provides its own implementations of the system frameworks (Foundation, UIKit, OpenGL ES, OpenAL, etc). The only code the [emulated CPU](https://github.com/merryhime/dynarmic) executes is the app binary and [a handful of libraries](touchHLE_dylibs/).
-
-The goal of this project is to run games from the early days of iOS:
-
-* Currently: iPhone, iPod touch and iPad apps for iPhone OS 2.x, iPhone OS 3.x, and iOS 4.0.x.
-* Longer term: high-DPI (“Retina Display”) support, newer iOS 4 versions, iOS 5.x, iOS 6.x.
-* [Never](https://github.com/touchHLE/touchHLE/issues/181#issuecomment-1777098259): 64-bit iOS.
-
-**This does not mean that all apps for these OS versions work.** The vast majority of iOS 2.x, 3.x and 4.x apps do not currently work in touchHLE, and the ones that do work are generally games (support for other apps is not prioritized as it is more complex and less fun). Compatibility will improve gradually over time with contributions from various developers. The [touchHLE app compatibility database](https://appdb.touchhle.org/) tracks which apps work in touchHLE; it is a crowdsourced effort to which anyone can contribute. **We don't take requests, so please do not ask us to support your favourite game.**
-
-If you're curious about the history and motivation behind the project, you might want to read [the original announcement](https://hikari.noyu.me/blog/2023-02-06-touchhle-anouncement-thread-tech-games-me-and-passion-projects.html). For an introduction to some of the technical details, check out [_touchHLE in depth_](https://hikari.noyu.me/blog/2023-04-13-touchhle-in-depth-1-function-calls.html).
-
-**Check out the website for downloads, FAQ, social media, and more:**<br>👉 <https://touchhle.org/> 👈
-
-## Important disclaimer
+Try it at https://zeyad.is-a.dev/touchHLE-web/.
 
 This project is not affiliated with or endorsed by Apple Inc in any way. iPhone, iOS, iPod, iPod touch and iPad are trademarks of Apple Inc in the United States and other countries.
 
 Only use touchHLE to emulate software you have obtained legally.
 
-## Platform support
+## Running an app
 
-* Officially supported: x64 Windows, x64 macOS and AArch64 Android.
-  * These are the platforms with binary releases.
-  * If you're an Apple Silicon Mac user, the x64 build reportedly works in Rosetta.
-* Probably works, but you must build it yourself: AArch64 macOS, x64 Linux, AArch64 Linux.
-* Never?: other architectures.
+Open the page and wait until the buttons stop saying "Loading…". Click "Choose .ipa" and pick an app you own. The page reads the file into the tab and runs it there. Nothing is uploaded.
 
-Input methods:
+The app has to be decrypted. touchHLE refuses encrypted App Store binaries.
 
-- For simulated touch input, there are four options:
-  - Mouse/trackpad input (tap/hold/drag by pressing the left mouse button)
-  - Virtual cursor using a game controller (move the cursor with the right analog stick, and tap/hold/drag by pressing the stick or the right shoulder button)
-  - Mapping of game controller buttons or the left analog stick to specific on-screen locations (see the descriptions of `--button-to-touch=`, `--dpad-to-touch=` and `--stick-to-touch=` in `OPTIONS_HELP.txt`)
-  - Real touch input, if you're on a device that has a touch screen
-- For simulated accelerometer input, there are three options:
-  - Tilt control simulation using the left analog stick of a game controller
-  - Tilt control simulation using a mouse (hold down the right mouse button)
-  - Real accelerometer input, if you are using a phone, tablet or some other device with a built-in accelerometer (TODO: support game controllers with accelerometers)
+touchHLE runs apps for iPhone OS 2.x, iPhone OS 3.x and iOS 4.0.x. Upstream's README says most of those apps don't work yet, and the ones that do are mostly games. The [touchHLE app compatibility database](https://appdb.touchhle.org/) lists what works in the native build. The browser build has had much less testing.
 
-## Development status
+Each page load runs one file. To run another, reload the page. Anything the app saves is lost when you reload.
 
-This project has been in development since December 2022. This was originally [hikari\_no\_yume](https://hikari.noyu.me/)'s full-time passion project. Since its release in February 2023, a number of other volunteers have also [contributed in their free time](https://github.com/touchHLE/touchHLE/graphs/contributors), and this is no longer a single-person project. There's only been a handful of releases so far and no promises can be made about the future. Please be patient.
+## Booting iOS 4
 
-In general, the supported functionality is defined by the supported apps: most contributors are interested in getting a particular game working, and contribute support for whichever missing features are needed for that game. Consequently, the completeness varies a lot between APIs, e.g. UIKit is easily the most hacky and incomplete of the large frameworks that have been implemented, because most games don't use very much of its functionality, whereas the OpenGL ES and OpenAL implementations are probably complete enough to cover a large number of early apps, because games make heavy use of these.
+touchHLE-web ships no Apple firmware and no decryption keys. To boot iOS 4 you need your own `.ipsw` and the root filesystem key for that firmware. The root filesystem image inside an IPSW is encrypted, and touchHLE can't read it without the key.
 
-# Usage
+1. Type the key (72 hex digits) into the "Root filesystem key" field.
+2. To put your own apps on the home screen, click "Add .ipa to home screen" and pick them.
+3. Click "Boot iOS 4 .ipsw" and pick the IPSW.
 
-First obtain touchHLE, either a [binary release](https://github.com/touchHLE/touchHLE/releases) or by building it yourself (see the next section).
+If the key isn't 72 hex digits, the page won't start. If it's the wrong key for that firmware, the boot stops with an error. The native build takes the key as `--rootfs-key=KEY`.
 
-You'll then need an app that you can run. The [app compatibility database](https://appdb.touchhle.org/) is a good guide for which versions of which apps are known to work, but bear in mind that it may contain outdated or inaccurate information. Note that the app binary must be decrypted to be usable.
+The only firmware tested so far is iOS 4.2.1 for the iPhone 3G (iPhone1,2, build 8C148). It boots to the lock screen, you unlock it by dragging the slider with the mouse, and apps open from the home screen. Calculator, for example, opens from the Utilities folder.
 
-There's a few ways you can run an app in touchHLE.
+The screen stays black while it boots, so watch the status line above it. The Home button under the screen, or the Home key on your keyboard, presses the iPhone's Home button. If SpringBoard turns the screen off, tap it or press Home. Only one app runs at a time, so opening an app closes the one before it.
 
-## Special Android notes
+The first boot unpacks the root filesystem image from the IPSW and saves it in the browser's site storage. It keeps one image, from the last IPSW. If you pick the same IPSW again, the page skips that step. The saved image is still encrypted, so every boot needs the key. Once the key opens the firmware, the page remembers it. Clearing the site's data removes both.
 
-Windows, Mac and Linux users can skip this section.
+## The JIT
 
-On Android, only the graphical user interface (app picker) is available. Therefore, you must put your “.ipa” files or “.app” bundles inside the “touchHLE\_apps” directory. Note that you can only do that once you have run touchHLE at least once.
+By default the guest's ARM code runs in an interpreter. To try the experimental JIT, add `?jit=on` to the address: https://zeyad.is-a.dev/touchHLE-web/?jit=on. It turns hot blocks of ARM and Thumb code into WebAssembly, and the rest still runs in the interpreter. If the browser won't compile a block, that code stays in the interpreter too.
 
-File management can be tricky on Android due to [restrictions introduced by Google in newer Android versions](https://developer.android.com/about/versions/11/privacy/storage#scoped-storage). One of these methods may work:
+## Browser requirements
 
-* If you tap the “File manager” button in touchHLE, this should open some sort of file manager. You might also be able to find touchHLE in your device's file manager app (often called “Files”, or sometimes “Downloads”), alongside cloud storage services. There are some limitations on what kinds of operations are possible. The files in this location are stored on your device. Warning: on some devices, the “File manager” button _will_ open a file manager, but it will crash when actually doing file operations (this is probably a bug in Android, we have not been able to debug it). If this happens to you, clear that file manager from your recent apps list and try to navigate to your device's file manager app directly instead, rather than via the touchHLE UI.
-* If you have an older version of Android, you may be able to directly access touchHLE's files by browsing to `/sdcard/Android/data/org.touchhle.android/files/touchHLE_apps`. Note that the `/sdcard` directory is usually not on the SD card.
-* You may be able to use ADB. If you're unfamiliar with ADB, try using <https://yume-chan.github.io/ya-webadb/> (in Google Chrome or another browser with WebUSB) with your device connected over USB. touchHLE's files can be found in “sdcard” > “Android” > “data” > “org.touchhle.android” > “files” > “touchHLE\_apps”.
+The page needs WebAssembly, WebGL and a lot of memory. It asks for about 1.2 GB when it starts, and booting iOS 4 takes it past 2 GB. It has been tested in desktop Chromium. Reloading the same tab many times can run it out of memory, so open a new tab instead.
 
-## Graphical user interface
+## How the web build differs from native
 
-touchHLE has a built-in app picker. If you put your `.ipa` files and `.app` bundles in the `touchHLE_apps` directory, they will show up in the app picker when you run touchHLE.
+| Part | Native | Web |
+| --- | --- | --- |
+| CPU | Dynarmic JIT | Rust interpreter, opt-in Wasm JIT |
+| Guest memory | 4 GiB reservation | 1 GiB window per process; the top 16 MiB (main thread stack) folds into its end |
+| Coroutines | corosensei | Emscripten fibers (`src/coroutine.rs`), needs `-sASYNCIFY` |
+| OpenGL | GLES 1.1 or GL 2.1 compat | GL 2.1 from [gl4es](https://github.com/ptitSeb/gl4es) on WebGL 1, one gl4es state per touchHLE context |
+| Windowing, audio | SDL2, OpenAL Soft | Emscripten's SDL2 and OpenAL ports |
+| Main loop | blocking | blocking, yields to the browser on each frame and while polling events |
 
-To configure the options, you can edit the `touchHLE_options.txt` file. To get a list of options, look in the `OPTIONS_HELP.txt` file.
+The interpreter only does ARMv6 (ARM, Thumb-1 and VFPv2), so if an app has both ARMv6 and ARMv7 code, the web build picks ARMv6. The web build is slower than native, mostly because the guest code runs in the interpreter.
 
-## Command-line user interface
+## Building it
 
-**This section does not apply on Android.**
+You need the [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html), activated so `emcc` is on `PATH` (CI uses 7.0.0). You also need Rust, CMake, make and Python 3.
 
-You can see the command-line usage by passing the `--help` flag.
+```sh
+git clone https://github.com/zeyadhost/touchHLE-web.git
+cd touchHLE-web
+git submodule update --init --depth 1
+rustup target add wasm32-unknown-emscripten
+web/build.sh
+python3 -m http.server -d web/dist 8080
+```
 
-If you're a Windows user and unfamiliar with the command line, these instructions may help you get started:
+Then open http://localhost:8080/. Stay on localhost: browsers only allow the cache and hashing APIs the page uses on https pages and localhost, so over plain http from another address the root filesystem cache is off and every boot unpacks the IPSW again.
 
-1. Move the `.ipa` file or `.app` bundle to the same folder as `touchHLE.exe`.
-2. Hold the Shift key and right-click on the empty space in the folder window.
-3. Click “Open with PowerShell”.
-4. Type `.\touchHLE.exe "YourAppNameHere.ipa"` (or `.app` as appropriate) and press Enter. If you want to specify options, add a space after the app name (outside the quotes) and then type the options, separated by spaces.
+Get every submodule, because the build also reads files from stb and dynarmic. `web/build.sh` builds gl4es the first time, then builds touchHLE without dynarmic. It packs `touchHLE_dylibs`, `touchHLE_fonts` and the default options into `touchHLE.data` and copies `web/index.html` next to it in `web/dist`.
 
-## Local multiplayer support
+`.github/workflows/web.yml` runs the same build on pull requests and on pushes to `trunk`, then runs the JIT and guest memory tests under Node. A push to `trunk` also deploys `web/dist` to GitHub Pages.
 
-touchHLE provides limited support for local multiplayer via Wi-Fi in some games. At the moment of writing it is supported in Asphalt 4 and N.O.V.A.
+The native desktop and Android builds are still in this repo, and CI still builds them. For those, see [dev-docs/building.md](dev-docs/building.md) and [upstream's README](https://github.com/touchHLE/touchHLE#readme). Before you send a pull request, read [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Real iOS devices could also join/host games!
+## Reporting problems
 
-**Usage:**
-1. Install touchHLE on 2+ devices connected to the same Wi-Fi network.
-2. **Important:** Ensure touchHLE is whitelisted in your OS firewall/network settings.
-3. Enable "Network access" in Quick options or via `--allow-network-access`.
-4. Start/join multiplayer in the game.
+Open an issue at https://github.com/zeyadhost/touchHLE-web/issues. Say which browser you used and which app or firmware (device and build), and paste the log from the box under the screen. Don't attach IPSWs or keys. Please don't report problems with the web build to upstream touchHLE, because they don't work on this fork.
 
-**FAQs:**
-* **Tunneling over Internet/VPN:** Not officially supported, but might work.
-* **Bluetooth:** Not supported.
+## Upstream
 
-**Known issues:**
-* On macOS you may need to launch touchHLE from terminal as otherwise OS will block network connections.
+touchHLE was started by [hikari_no_yume](https://hikari.noyu.me/), and [many other people](https://github.com/touchHLE/touchHLE/graphs/contributors) have worked on it since. Its website, https://touchhle.org/, has downloads and an FAQ. For the native desktop and Android versions (platforms, input, options, local multiplayer), read [upstream's README](https://github.com/touchHLE/touchHLE#readme). It also thanks the people and libraries touchHLE is built on.
 
-## Other stuff
+The web build also uses [gl4es](https://github.com/ptitSeb/gl4es) (MIT license) for OpenGL on WebGL, and [Emscripten](https://emscripten.org/).
 
-Any data saved by the app (e.g. **saved games**) are stored in the `touchHLE_sandbox` folder.
-
-If the emulator crashes almost immediately while running a **known-working** version of a game, please check whether you have any overlays turned on like the Steam overlay, Discord overlay, RivaTuner Statistics Server, etc. Sadly, as useful as these tools are, they work by injecting themselves into other apps or games and don't always clean up after themselves, so they can break touchHLE… it's not our fault. 😢 Currently only RivaTuner Statistics Server is known to be a problem. If you find another overlay that doesn't work, please tell us about it.
-
-# Building and contributing
-
-See the `CONTRIBUTING.md` file in the git repo if you want to contribute. If you just want build touchHLE, look at `dev-docs/building.md`.
-
-# License
+## License
 
 touchHLE © 2023–2026 touchHLE project contributors.
 
@@ -128,24 +94,6 @@ The source code of touchHLE itself (not its dependencies) is licensed under the 
 
 Due to license compatibility concerns, binaries are under the GNU General Public License version 3 or later.
 
-For a best effort listing of all licenses of dependencies, build touchHLE and pass the `--copyright` flag when running it, or click the “Copyright info” button in the app picker.
+For a best effort listing of all licenses of dependencies, build touchHLE and pass the `--copyright` flag when running it, or click the "Copyright info" button in the app picker.
 
 Please note that different licensing terms apply to the bundled dynamic libraries (in `touchHLE_dylibs/`) and fonts (in `touchHLE_fonts/`). Please consult the respective directories for more information.
-
-# Thanks
-
-We stand on the shoulders of giants. Thank you to:
-
-* Everyone who has contributed to the project or supported any of its contributors financially.
-* The authors of and contributors to the many libraries used by this project: [dynarmic](https://github.com/merryhime/dynarmic), [rust-macho](https://github.com/flier/rust-macho), [SDL](https://libsdl.org/), [rust-sdl2](https://github.com/Rust-SDL2/rust-sdl2), [stb\_image](https://github.com/nothings/stb), Imagination Technologies' [PVRTC decompressor](https://github.com/powervr-graphics/Native_SDK/blob/master/framework/PVRCore/texture/PVRTDecompress.cpp), [openal-soft](https://github.com/kcat/openal-soft), [hound](https://github.com/ruuda/hound), [Symphonia](https://github.com/pdeljanov/Symphonia), [RustType](https://gitlab.redox-os.org/redox-os/rusttype), [the Liberation fonts](https://github.com/liberationfonts/liberation-fonts), [the Noto CJK fonts](https://github.com/googlefonts/noto-cjk), [rust-plist](https://github.com/ebarnard/rust-plist), [nibarchive](https://github.com/michaelwright235/nibarchive), [quick-xml](https://github.com/tafia/quick-xml), [gl-rs](https://github.com/brendanzab/gl-rs), [cargo-license](https://github.com/onur/cargo-license), [cc-rs](https://github.com/rust-lang/cc-rs), [cmake-rs](https://github.com/rust-lang/cmake-rs), [cargo-ndk](https://github.com/bbqsrc/cargo-ndk), [cargo-ndk-android-gradle](https://github.com/willir/cargo-ndk-android-gradle), [md-5 and sha1](https://github.com/RustCrypto/hashes), [encoding_rs](https://github.com/hsivonen/encoding_rs), [corosensei](https://github.com/Amanieu/corosensei), [uuid](https://github.com/uuid-rs/uuid) and the Rust standard library.
-* The Skyline emulator project (RIP), for [writing the tedious boilerplate needed to replace file management on newer Android versions](https://github.com/skyline-emu/skyline/blob/dc20a615275f66bee20a4fd851ef0231daca4f14/app/src/main/java/emu/skyline/provider/DocumentsProvider.kt).
-* The [Rust project](https://www.rust-lang.org/) generally.
-* The various people out there who've documented the iOS platform, officially or otherwise. Much of this documentation is linked to within this codebase!
-* The iOS hacking/jailbreaking community.
-* The Free Software Foundation, for making libgcc and libstdc++ copyleft and therefore saving this project from ABI hell.
-* The National Security Agency of the United States of America, for [Ghidra](https://ghidra-sre.org/).
-* [GerritForge](http://www.gerritforge.com/) for providing free Gerrit hosting to the general public, including us.
-* The many contributors to [Gerrit](https://www.gerritcodereview.com/).
-* Many friends who took an interest in the project and gave suggestions and encouragement.
-* Developers of early iOS apps. What treasures you created!
-* Apple, and NeXT before them, for creating such fantastic platforms.

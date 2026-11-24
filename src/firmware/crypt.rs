@@ -29,7 +29,7 @@ pub struct EncryptedImage<R: ReadAt> {
 }
 
 impl<R: ReadAt> EncryptedImage<R> {
-    /// `key` is the 36-byte key published for the root filesystem
+    /// `key` is the 36-byte root filesystem key the user supplies
     /// (16-byte AES key followed by the 20-byte HMAC key).
     pub fn new(inner: R, key: &[u8]) -> Result<Self, String> {
         if key.len() != 36 {

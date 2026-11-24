@@ -3,12 +3,24 @@
 A WebAssembly build of touchHLE. Open the page, pick an `.ipa` you own, and it
 runs in the tab; nothing is uploaded anywhere.
 
-When booting firmware, the browser saves the last extracted root filesystem
-image in local site storage. Select the same IPSW again to skip extraction.
-Clearing site data removes the cache.
-
 The browser uses the interpreter by default. Add `?jit=on` to try the
 experimental ARM and Thumb WebAssembly JIT.
+
+## Booting iOS 4 firmware
+
+touchHLE-web ships no Apple firmware and no decryption keys. To boot
+SpringBoard you bring your own `.ipsw` and the root filesystem key for that
+firmware: the root filesystem image inside an IPSW is encrypted, and touchHLE
+cannot read it without the key. Enter the key (72 hex digits) in the "Root
+filesystem key" field before choosing the `.ipsw`; the native build takes it as
+`--rootfs-key=KEY`. Without a key the page refuses to boot, and a key that does
+not fit the firmware stops the boot with an error. Only iPhone1,2 iOS 4.2.1
+(8C148) has been tested.
+
+When booting firmware, the browser saves the last extracted root filesystem
+image in local site storage. Select the same IPSW again to skip extraction.
+The saved image is still encrypted, so every boot needs the key; the page
+remembers the last key that booted. Clearing site data removes both.
 
 ## How it differs from the native build
 

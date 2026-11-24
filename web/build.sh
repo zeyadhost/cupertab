@@ -19,5 +19,6 @@ cp target/wasm32-unknown-emscripten/release/touchHLE.js target/wasm32-unknown-em
 python3 "$(dirname "$(command -v emcc)")/tools/file_packager.py" "$out/touchHLE.data" \
     --preload touchHLE_dylibs touchHLE_fonts touchHLE_default_options.txt \
     --js-output="$out/touchHLE.data.js"
-cp web/index.html "$out/"
+build=$(sha256sum "$out/touchHLE.wasm" | cut -c1-16)
+sed "s/@TOUCHHLE_BUILD@/$build/" web/index.html > "$out/index.html"
 touch "$out/.nojekyll"

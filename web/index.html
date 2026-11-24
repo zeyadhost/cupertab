@@ -21,6 +21,9 @@
   #status { color: #fc6; min-height: 1.5em; }
   #home { display: none; background: #333; color: #fff; border: 0; padding: 10px 18px;
           border-radius: 8px; cursor: pointer; }
+  #clear { background: none; border: 0; padding: 0; color: #8cf; font: inherit; cursor: pointer;
+           text-decoration: underline; }
+  #clear:disabled { color: #666; cursor: default; }
   #log { width: min(900px, 100%); height: 220px; overflow: auto; background: #000; color: #9c9;
          font: 12px/1.4 ui-monospace, monospace; padding: 8px; box-sizing: border-box;
          white-space: pre-wrap; border-radius: 6px; }
@@ -51,6 +54,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     <input type="file" id="install" accept=".ipa,.zip" multiple hidden disabled>
   </label>
 </div>
+<button id="clear" hidden title="Removes the unpacked firmware and the saved iPhone data from this browser">Clear saved data</button>
 <div id="status"></div>
 <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
 <button id="home" title="Home button (or the Home key)">Home</button>
@@ -147,6 +151,24 @@ enter the root filesystem key for your own firmware. This browser remembers it a
   const dataDir = '/touchHLE_firmware';
   const dataKey = new URL('data-partition-v1', document.baseURI);
   const rootfsDigestHeader = 'X-TouchHLE-IPSW-Digest';
+  // web/build.sh puts a hash of touchHLE.wasm here. Files touchHLE decoded
+  // are only reused by the build that decoded them.
+  const build = '@TOUCHHLE_BUILD@';
+  const savedCaches = ['touchHLE-web-rootfs-v1', 'touchHLE-web-snapshot-v1'];
+  const clearButton = document.getElementById('clear');
+  caches.keys().then((names) => { clearButton.hidden = !names.some((name) => savedCaches.includes(name)); })
+    .catch(() => {});
+  clearButton.addEventListener('click', async () => {
+    clearButton.disabled = true;
+    try {
+      await Promise.all(savedCaches.map((name) => caches.delete(name)));
+      statusEl.textContent = 'Saved data cleared. The next boot unpacks the IPSW again.';
+      clearButton.hidden = true;
+    } catch (e) {
+      statusEl.textContent = 'Could not clear the saved data.';
+    }
+    clearButton.disabled = false;
+  });
   const sha256 = async (bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
     (byte) => byte.toString(16).padStart(2, '0')).join('');
   // An IPSW is a zip file. Its central directory has the size and CRC-32 of
@@ -165,9 +187,9 @@ enter the root filesystem key for your own firmware. This browser remembers it a
   async function restoreRootfsCache(ipsw) {
     try {
       const [cache, digest] = await Promise.all([caches.open('touchHLE-web-rootfs-v1'), ipswDigest(ipsw)]);
-      const restore = async (key, path) => {
+      const restore = async (key, path, id) => {
         const saved = await cache.match(key);
-        if (saved?.headers.get(rootfsDigestHeader) !== digest) return;
+        if (saved?.headers.get(rootfsDigestHeader) !== id) return;
         const bytes = new Uint8Array(await saved.arrayBuffer());
         try { Module.FS.mkdir(rootfsDir); } catch (e) {}
         Module.FS.writeFile(path, bytes, { canOwn: true });
@@ -178,7 +200,11 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         const buffer = await saved.arrayBuffer();
         try { unpackDir(buffer); } catch (e) { log('Could not restore the data partition.'); }
       };
-      await Promise.all([restore(rootfsKey, rootfsPath), restore(sharedCacheKey, sharedCachePath), restoreData()]);
+      await Promise.all([
+        restore(rootfsKey, rootfsPath, digest),
+        restore(sharedCacheKey, sharedCachePath, digest + ' ' + build),
+        restoreData()
+      ]);
       return { cache, digest };
     } catch (err) {
       log('Root filesystem cache unavailable; booting without it.');
@@ -227,7 +253,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
       }
     }
   }
-  async function saveCacheFile({ cache, digest }, path, key) {
+  async function saveCacheFile(cache, path, key, id) {
     const fs = Module.FS;
     const size = fs.stat(path).size;
     let offset = 0;
@@ -251,7 +277,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
       }
     });
     await cache.put(key, new Response(image, {
-      headers: { [rootfsDigestHeader]: digest }
+      headers: { [rootfsDigestHeader]: id }
     }));
   }
   async function launch(file, dir, args) {
@@ -259,6 +285,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     ipswInput.disabled = true;
     installInput.disabled = true;
     keyInput.disabled = true;
+    clearButton.disabled = true;
     label.classList.add('disabled');
     ipswLabel.classList.add('disabled');
     installLabel.classList.add('disabled');
@@ -281,7 +308,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         Module['touchHLEFastStart'] = true;
         statusEl.textContent = 'Starting SpringBoard…';
         if (persistent && extracted) {
-          saveCacheFile(persistent, rootfsPath, rootfsKey)
+          saveCacheFile(persistent.cache, rootfsPath, rootfsKey, persistent.digest)
             .catch(() => log('Could not save the root filesystem cache.'));
         }
       };
@@ -299,7 +326,9 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         if (document.visibilityState === 'hidden') saveData();
       });
       window.touchHLESharedCacheReady = () => {
-        const saving = persistent ? saveCacheFile(persistent, sharedCachePath, sharedCacheKey) : Promise.resolve();
+        const saving = persistent
+          ? saveCacheFile(persistent.cache, sharedCachePath, sharedCacheKey, persistent.digest + ' ' + build)
+          : Promise.resolve();
         saving.catch(() => log('Could not save the shared cache.'))
           .finally(() => Module.FS.unlink(sharedCachePath));
       };

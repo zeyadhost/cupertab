@@ -22,4 +22,5 @@ python3 "$(dirname "$(command -v emcc)")/tools/file_packager.py" "$out/touchHLE.
     --js-output="$out/touchHLE.data.js"
 build=$(sha256sum "$out/touchHLE.wasm" | cut -c1-16)
 sed "s/@TOUCHHLE_BUILD@/$build/" web/index.html > "$out/index.html"
+cp web/cupertab-*.png "$out/"
 touch "$out/.nojekyll"

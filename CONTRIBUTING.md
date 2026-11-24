@@ -11,11 +11,11 @@ Please bear in mind that there are infinitely many apps that do not work in touc
 
 ## Source control and review
 
-This is a fork of [touchHLE](https://github.com/touchHLE/touchHLE). Its rules differ from upstream's, and changes made here are not sent upstream.
+Cupertab is a port based on [touchHLE](https://github.com/touchHLE/touchHLE). It started as a fork of it. Its rules differ from upstream's, and changes made here are not sent upstream.
 
 ```
-$ git clone https://github.com/zeyadhost/touchHLE-web.git
-$ cd touchHLE-web
+$ git clone https://github.com/zeyadhost/cupertab.git
+$ cd cupertab
 ```
 
 Make a branch from `trunk` and open a pull request against `trunk` in this repository. Keep each pull request to one reviewable change. CI must pass before it is merged.
@@ -34,7 +34,7 @@ Avoid big commits that mix unrelated changes.
 
 (Please also read the copyright rules in the code of conduct.)
 
-Upstream touchHLE forbids disassembling iOS components and using AI assistants. This fork does not. Its firmware boot mode runs Apple's own dyld, frameworks and SpringBoard from an IPSW the user supplies, and emulates the XNU kernel interface underneath them. Building that interface means studying how those binaries call the kernel: syscalls, Mach traps and messages, and IOKit methods.
+Upstream touchHLE forbids disassembling iOS components and using AI assistants. Cupertab does not. Its firmware boot mode runs Apple's own dyld, frameworks and SpringBoard from an IPSW the user supplies, and emulates the XNU kernel interface underneath them. Building that interface means studying how those binaries call the kernel: syscalls, Mach traps and messages, and IOKit methods.
 
 The rules that still apply:
 

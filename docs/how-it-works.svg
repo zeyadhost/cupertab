@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="19 19 842 940" width="842" height="940" role="img" aria-labelledby="t d">
+<title id="t">How Cupertab works</title>
+<desc id="d">Your .ipsw and key, or an .ipa, are read into the browser tab. Inside touchHLE.wasm, Apple's own iOS 4 code runs unmodified on an ARMv6 interpreter written in Rust, with an opt-in JIT to WebAssembly. Its system calls go to Cupertab's emulated kernel. An .ipa app calls touchHLE's own frameworks instead. Frames go to a WebGL canvas, the mouse acts as a finger, and the browser's site storage keeps the root filesystem image, the decrypted shared cache, iOS's saved files and a lock screen snapshot for the next visit.</desc>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#6A7DA3"/></marker>
+</defs>
+<style>
+.s{font-family:ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif}.m{font-family:ui-monospace, SFMono-Regular, Consolas, Menlo, 'Liberation Mono', monospace}.b{font-weight:700}
+.pulse{opacity:0;animation:pulse 12s ease-in-out infinite}
+@keyframes pulse{0%{opacity:0}5%{opacity:1}13%{opacity:.9}18%{opacity:0}100%{opacity:0}}
+.q0{animation-delay:0s}
+.q1{animation-delay:2s}
+.q2{animation-delay:4s}
+.q3{animation-delay:6s}
+.q4{animation-delay:8s}
+.q5{animation-delay:10s}
+.dot{animation-timing-function:ease-in-out;animation-iteration-count:infinite}
+.d1{animation-name:d1;animation-duration:6s}
+@keyframes d1{0%{transform:translateY(-22px);opacity:0}4%{opacity:1}22%{opacity:1}26%{transform:translateY(22px);opacity:0}100%{transform:translateY(22px);opacity:0}}
+.d2{animation-name:d2;animation-duration:2.4s}
+@keyframes d2{0%{transform:translateX(-22px)}50%{transform:translateX(22px)}100%{transform:translateX(-22px)}}
+.d3{animation-name:d3;animation-duration:3s}
+.d4{animation-name:d3;animation-duration:3s;animation-delay:-1.5s;animation-direction:reverse}
+@keyframes d3{0%{transform:translateY(-26px);opacity:0}10%{opacity:1}80%{opacity:1}90%{transform:translateY(26px);opacity:0}100%{transform:translateY(26px);opacity:0}}
+.d5{animation-name:d5;animation-duration:8s}
+@keyframes d5{0%{transform:translateY(-26px);opacity:0}5%{opacity:1}25%{transform:translateY(26px);opacity:1}30%{opacity:0}50%{transform:translateY(26px);opacity:0}55%{opacity:1}75%{transform:translateY(-26px);opacity:1}80%{opacity:0}100%{transform:translateY(-26px);opacity:0}}
+@media (prefers-reduced-motion:reduce){.pulse,.dot{animation:none}}
+</style>
+<rect x="20" y="20" width="840" height="116" rx="16" fill="#111B30" stroke="#27375A" stroke-width="1.5"/>
+<rect class="pulse q0" x="20" y="20" width="840" height="116" rx="16" fill="#FFD54A" fill-opacity=".07" stroke="#FFD54A" stroke-width="2.5"/>
+<text x="440" y="54" class="s b" font-size="18" fill="#FFD54A" text-anchor="middle" letter-spacing="2">YOUR FILES</text>
+<text x="440" y="90" font-size="25" fill="#EEF3FA" text-anchor="middle" class="s b"><tspan class="m">.ipsw</tspan><tspan class="s"> + root filesystem key, or an </tspan><tspan class="m">.ipa</tspan></text>
+<text x="440" y="120" class="s" font-size="20" fill="#A3B3D1" text-anchor="middle">You pick them. Nothing is uploaded.</text>
+<path d="M440 136L440 184" stroke="#6A7DA3" stroke-width="2" marker-end="url(#a)"/>
+<rect x="452" y="143" width="188" height="34" rx="17" fill="#111B30" stroke="#27375A" stroke-width="1.5"/>
+<text x="546.0" y="167" class="s" font-size="19" fill="#A3B3D1" text-anchor="middle">read into the tab</text>
+<g class="dot d1"><circle cx="440" cy="160" r="9" fill="#6CB6FF" fill-opacity=".3"/><circle cx="440" cy="160" r="5" fill="#6CB6FF" stroke="#1F6FEB" stroke-width="1.5"/></g>
+<rect x="20" y="184" width="840" height="536" rx="16" fill="#0E1A36" stroke="#2F5FC4" stroke-width="1.5"/>
+<path d="M20.75 228V200a15.25 15.25 0 0 1 15.25-15.25h808a15.25 15.25 0 0 1 15.25 15.25V228z" fill="#0A1328"/>
+<path d="M20 228H36M236 228H860" stroke="#2F5FC4" stroke-width="1.5"/>
+<path d="M36 228V202a10 10 0 0 1 10-10h180a10 10 0 0 1 10 10v26" fill="#0E1A36" stroke="#2F5FC4" stroke-width="1.5"/>
+<rect x="36.75" y="226" width="198.5" height="4" fill="#0E1A36"/>
+<text x="58" y="217" class="s b" font-size="20" fill="#EEF3FA">Cupertab</text>
+<text x="842" y="213" font-size="18" fill="#A3B3D1" text-anchor="end" class="s"><tspan class="m" fill="#7FD4F8">touchHLE.wasm</tspan> built with Emscripten</text>
+<rect x="36" y="244" width="808" height="118" rx="12" fill="#15223F" stroke="#2C3E66" stroke-width="1.5"/>
+<rect class="pulse q1" x="36" y="244" width="808" height="118" rx="12" fill="#C9D1DC" fill-opacity=".07" stroke="#C9D1DC" stroke-width="2.5"/>
+<text x="58" y="274" class="s b" font-size="18" fill="#C9D1DC" letter-spacing="2">GUEST CODE · ARM</text>
+<text x="58" y="306" class="s b" font-size="25" fill="#EEF3FA">Apple's own iOS 4, unmodified</text>
+<rect x="58" y="320" width="149" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="132.5" y="344.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">SpringBoard</text>
+<rect x="217" y="320" width="74" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="254.0" y="344.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">apps</text>
+<rect x="301" y="320" width="209" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="405.5" y="344.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">dyld shared cache</text>
+<rect x="520" y="320" width="249" height="34" rx="9" fill="none" stroke="#33497A" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text x="644.5" y="344.2" class="s" font-size="20" fill="#A3B3D1" text-anchor="middle">or the app in your .ipa</text>
+<path d="M212 362L212 404" stroke="#6A7DA3" stroke-width="2" marker-end="url(#a)"/>
+<text x="226" y="390" class="s" font-size="19" fill="#A3B3D1">runs on</text>
+<rect x="36" y="404" width="348" height="300" rx="12" fill="#15223F" stroke="#2C3E66" stroke-width="1.5"/>
+<rect class="pulse q2" x="36" y="404" width="348" height="300" rx="12" fill="#7FD4F8" fill-opacity=".07" stroke="#7FD4F8" stroke-width="2.5"/>
+<text x="58" y="434" class="s b" font-size="18" fill="#7FD4F8" letter-spacing="2">CPU</text>
+<text x="58" y="466" class="s b" font-size="25" fill="#EEF3FA">ARMv6 interpreter</text>
+<text x="58" y="494" class="s" font-size="20" fill="#A3B3D1">written in Rust</text>
+<rect x="58" y="510" width="71" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="93.5" y="534.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">ARM</text>
+<rect x="139" y="510" width="116" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="197.0" y="534.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">Thumb-1</text>
+<rect x="265" y="510" width="88" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="309.0" y="534.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">VFPv2</text>
+<path d="M58 566H362" stroke="#2C3E66" stroke-width="1.5"/>
+<rect x="58" y="580" width="110" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="113.0" y="604.2" class="m" font-size="20" fill="#DCE6F7" text-anchor="middle">?jit=on</text>
+<text x="176" y="603" class="s" font-size="20" fill="#A3B3D1">JIT to Wasm</text>
+<text x="58" y="646" class="s" font-size="20" fill="#A3B3D1">hot routines like memmove</text>
+<text x="58" y="674" class="s" font-size="20" fill="#A3B3D1">run as Rust, not ARM</text>
+<rect x="452" y="404" width="392" height="168" rx="12" fill="#15223F" stroke="#2C3E66" stroke-width="1.5"/>
+<rect class="pulse q3" x="452" y="404" width="392" height="168" rx="12" fill="#5BE05A" fill-opacity=".07" stroke="#5BE05A" stroke-width="2.5"/>
+<text x="474" y="434" class="s b" font-size="18" fill="#5BE05A" letter-spacing="2">KERNEL · IPSW</text>
+<text x="474" y="466" class="s b" font-size="25" fill="#EEF3FA">Emulated iOS kernel</text>
+<rect x="474" y="482" width="103" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="525.5" y="506.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">syscalls</text>
+<rect x="587" y="482" width="117" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="645.5" y="506.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">Mach IPC</text>
+<rect x="714" y="482" width="74" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="751.0" y="506.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">IOKit</text>
+<rect x="474" y="526" width="172" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="560.0" y="550.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">MBX 2D blitter</text>
+<rect x="452" y="588" width="392" height="116" rx="12" fill="#15223F" stroke="#2C3E66" stroke-width="1.5"/>
+<text x="474" y="616" class="s b" font-size="18" fill="#7FD4F8" letter-spacing="2">FRAMEWORKS · IPA</text>
+<text x="474" y="647" class="s b" font-size="25" fill="#EEF3FA">touchHLE's own</text>
+<rect x="474" y="662" width="73" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="510.5" y="686.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">UIKit</text>
+<rect x="557" y="662" width="138" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="626.0" y="686.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">OpenGL ES</text>
+<rect x="705" y="662" width="104" height="34" rx="9" fill="#1B2B4D" stroke="#33497A" stroke-width="1.5"/>
+<text x="757.0" y="686.2" class="s" font-size="20" fill="#DCE6F7" text-anchor="middle">OpenAL</text>
+<path d="M386 486L450 486" stroke="#6A7DA3" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<text x="418" y="474" class="m" font-size="18" fill="#A3B3D1" text-anchor="middle">svc</text>
+<g class="dot d2"><circle cx="418" cy="486" r="9" fill="#6CB6FF" fill-opacity=".3"/><circle cx="418" cy="486" r="5" fill="#6CB6FF" stroke="#1F6FEB" stroke-width="1.5"/></g>
+<path d="M386 644L450 644" stroke="#6A7DA3" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)" stroke-dasharray="6 5"/>
+<text x="418" y="632" class="m" font-size="18" fill="#A3B3D1" text-anchor="middle">svc</text>
+<path d="M150 720L150 784" stroke="#6A7DA3" stroke-width="2" marker-end="url(#a)"/>
+<rect x="162" y="735" width="94" height="34" rx="17" fill="#111B30" stroke="#27375A" stroke-width="1.5"/>
+<text x="209.0" y="759" class="s" font-size="19" fill="#A3B3D1" text-anchor="middle">frames</text>
+<g class="dot d3"><circle cx="150" cy="752" r="9" fill="#6CB6FF" fill-opacity=".3"/><circle cx="150" cy="752" r="5" fill="#6CB6FF" stroke="#1F6FEB" stroke-width="1.5"/></g>
+<path d="M300 784L300 720" stroke="#6A7DA3" stroke-width="2" marker-end="url(#a)"/>
+<rect x="312" y="735" width="77" height="34" rx="17" fill="#111B30" stroke="#27375A" stroke-width="1.5"/>
+<text x="350.5" y="759" class="s" font-size="19" fill="#A3B3D1" text-anchor="middle">input</text>
+<g class="dot d4"><circle cx="300" cy="752" r="9" fill="#6CB6FF" fill-opacity=".3"/><circle cx="300" cy="752" r="5" fill="#6CB6FF" stroke="#1F6FEB" stroke-width="1.5"/></g>
+<path d="M650 720L650 784" stroke="#6A7DA3" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<rect x="662" y="735" width="152" height="34" rx="17" fill="#111B30" stroke="#27375A" stroke-width="1.5"/>
+<text x="738.0" y="759" class="s" font-size="19" fill="#A3B3D1" text-anchor="middle">save, restore</text>
+<g class="dot d5"><circle cx="650" cy="752" r="9" fill="#6CB6FF" fill-opacity=".3"/><circle cx="650" cy="752" r="5" fill="#6CB6FF" stroke="#1F6FEB" stroke-width="1.5"/></g>
+<rect x="20" y="784" width="410" height="174" rx="16" fill="#111B30" stroke="#27375A" stroke-width="1.5"/>
+<rect class="pulse q4" x="20" y="784" width="410" height="174" rx="16" fill="#FFAA55" fill-opacity=".07" stroke="#FFAA55" stroke-width="2.5"/>
+<text x="44" y="816" class="s b" font-size="18" fill="#FFAA55" letter-spacing="2">THE PAGE</text>
+<text x="44" y="850" class="s" font-size="20" fill="#EEF3FA">canvas drawn with WebGL</text>
+<text x="44" y="880" class="s" font-size="20" fill="#A3B3D1">through gl4es</text>
+<text x="44" y="910" class="s" font-size="20" fill="#EEF3FA">the mouse acts as a finger</text>
+<text x="44" y="940" class="s" font-size="20" fill="#EEF3FA">Home key presses Home</text>
+<rect x="450" y="784" width="410" height="174" rx="16" fill="#111B30" stroke="#27375A" stroke-width="1.5"/>
+<rect class="pulse q5" x="450" y="784" width="410" height="174" rx="16" fill="#FFD54A" fill-opacity=".07" stroke="#FFD54A" stroke-width="2.5"/>
+<text x="474" y="816" class="s b" font-size="18" fill="#FFD54A" letter-spacing="2">SITE STORAGE</text>
+<text x="474" y="850" class="s" font-size="20" fill="#EEF3FA">root filesystem image</text>
+<text x="474" y="880" class="s" font-size="20" fill="#EEF3FA">decrypted shared cache</text>
+<text x="474" y="910" class="s" font-size="20" fill="#EEF3FA">iOS's saved files</text>
+<text x="474" y="940" class="s" font-size="20" fill="#EEF3FA">lock screen snapshot</text>
+</svg>

@@ -29,8 +29,8 @@ pub enum Service {
 #[derive(Default)]
 pub struct Socket {
     pub service: Option<Service>,
-    rx: VecDeque<u8>,
-    tx: Vec<u8>,
+    pub(super) rx: VecDeque<u8>,
+    pub(super) tx: Vec<u8>,
 }
 
 impl Socket {
@@ -182,23 +182,23 @@ pub struct Spawn {
     pub mach_services: Vec<String>,
 }
 
-struct Job {
-    label: String,
-    pid: u32,
-    exit: Option<i32>,
+pub(super) struct Job {
+    pub(super) label: String,
+    pub(super) pid: u32,
+    pub(super) exit: Option<i32>,
 }
 
 /// launchd's jobs, which outlive the connection that submitted them.
-struct Launchd {
-    jobs: Vec<Job>,
-    spawns: Vec<Spawn>,
+pub(super) struct Launchd {
+    pub(super) jobs: Vec<Job>,
+    pub(super) spawns: Vec<Spawn>,
     /// Processes of removed jobs, for the kernel to end.
-    kills: Vec<u32>,
-    next_pid: u32,
+    pub(super) kills: Vec<u32>,
+    pub(super) next_pid: u32,
 }
 
 thread_local! {
-    static LAUNCHD: RefCell<Launchd> = const { RefCell::new(Launchd {
+    pub(super) static LAUNCHD: RefCell<Launchd> = const { RefCell::new(Launchd {
         jobs: Vec::new(),
         spawns: Vec::new(),
         kills: Vec::new(),

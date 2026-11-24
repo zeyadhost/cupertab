@@ -26,24 +26,24 @@ const SUBSYSTEM: u32 = 78945668;
 const NOTIFY_STATUS_OK: u32 = 0;
 const NOTIFY_STATUS_INVALID_TOKEN: u32 = 2;
 
-enum Delivery {
+pub(super) enum Delivery {
     Check { changed: bool },
     MachPort { port: u32, client_token: u32 },
 }
 
-struct Registration {
-    name: String,
-    delivery: Delivery,
+pub(super) struct Registration {
+    pub(super) name: String,
+    pub(super) delivery: Delivery,
 }
 
 #[derive(Default)]
 pub struct Notifyd {
-    states: HashMap<String, u64>,
-    tokens: HashMap<u32, Registration>,
-    next_token: u32,
+    pub(super) states: HashMap<String, u64>,
+    pub(super) tokens: HashMap<u32, Registration>,
+    pub(super) next_token: u32,
     /// Check counter slots in the shared memory, by name.
-    slots: HashMap<String, u32>,
-    shm: Option<Rc<RefCell<Shm>>>,
+    pub(super) slots: HashMap<String, u32>,
+    pub(super) shm: Option<Rc<RefCell<Shm>>>,
 }
 
 /// `OSThermalNotificationLevel` at which each mitigation starts, as

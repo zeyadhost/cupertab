@@ -17,6 +17,8 @@ mod loader;
 pub mod lockdown;
 mod mach;
 mod notifyd;
+#[cfg(target_os = "emscripten")]
+mod snapshot;
 mod testinput;
 mod vfs;
 mod vm;
@@ -876,6 +878,8 @@ impl Kernel {
                 match self.pick_thread() {
                     Some(idx) => self.switch_to(idx),
                     None => {
+                        #[cfg(target_os = "emscripten")]
+                        snapshot::idle(self);
                         crate::sleep(std::time::Duration::from_millis(1));
                         continue;
                     }
@@ -1108,6 +1112,9 @@ pub fn boot_firmware(
     let cache = &base;
     let fw = Firmware::open(ipsw_path, cache, key)?;
     let overlay = base.join(format!("{}_{}_data", fw.info.product_type, fw.info.build));
+    #[cfg(target_os = "emscripten")]
+    let mut kernel = snapshot::boot(fw, &overlay, exe_path)?;
+    #[cfg(not(target_os = "emscripten"))]
     let mut kernel = Kernel::boot(fw, &overlay, exe_path, vec![exe_path.to_string()])?;
     for ipa in ipas {
         match installd::install_ipa(&kernel, ipa) {

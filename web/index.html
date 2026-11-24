@@ -164,6 +164,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     clearButton.disabled = true;
     try {
       await Promise.all(savedCaches.map((name) => caches.delete(name)));
+      try { localStorage.removeItem(lastIpswStorage); } catch (e) {}
       statusEl.textContent = 'Saved data cleared. The next boot unpacks the IPSW again.';
       clearButton.hidden = true;
     } catch (e) {
@@ -186,29 +187,79 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     }
     return sha256(await ipsw.arrayBuffer());
   }
-  async function restoreRootfsCache(ipsw) {
+  // touchHLE reads only the zip directory and small files of an IPSW whose
+  // root filesystem image is already saved, so only those are copied.
+  async function ipswStub(ipsw) {
+    const read = async (start, end) => new Uint8Array(await ipsw.slice(start, end).arrayBuffer());
+    const tailStart = Math.max(0, ipsw.size - 65557);
+    const tail = await read(tailStart, ipsw.size);
+    const view = new DataView(tail.buffer);
+    for (let i = tail.length - 22; i >= 0; i--) {
+      if (view.getUint32(i, true) !== 0x06054b50) continue;
+      const count = view.getUint16(i + 10, true);
+      const offset = view.getUint32(i + 16, true);
+      if (count === 0xffff || offset >= tailStart + i) return null;
+      const dir = await read(offset, ipsw.size);
+      const entries = new DataView(dir.buffer);
+      const stub = new Uint8Array(ipsw.size);
+      stub.set(dir, offset);
+      const copies = [];
+      for (let at = 0, n = 0; n < count; n++) {
+        if (at + 46 > dir.length || entries.getUint32(at, true) !== 0x02014b50) return null;
+        const packed = entries.getUint32(at + 20, true);
+        const local = entries.getUint32(at + 42, true);
+        if (packed === 0xffffffff || local === 0xffffffff) return null;
+        copies.push(read(local, local + 30).then(async (header) => {
+          const fields = new DataView(header.buffer);
+          const end = local + 30 + fields.getUint16(26, true) + fields.getUint16(28, true);
+          stub.set(await read(local, end + (packed < 1 << 20 ? packed : 0)), local);
+        }));
+        at += 46 + entries.getUint16(at + 28, true) + entries.getUint16(at + 30, true) + entries.getUint16(at + 32, true);
+      }
+      await Promise.all(copies);
+      return stub;
+    }
+    return null;
+  }
+  // Reads of saved files, started while the page loads for the IPSW this
+  // browser booted last, so a repeat visit does not wait for them after the pick.
+  const lastIpswStorage = 'touchHLE-web-last-ipsw';
+  const early = new Map();
+  function prefetch(id, read) {
+    if (!early.has(id)) early.set(id, read().catch(() => null));
+    return early.get(id);
+  }
+  function take(id, read) {
+    const reading = prefetch(id, read);
+    early.delete(id);
+    return reading;
+  }
+  const readSaved = (key, id) => () => caches.open('touchHLE-web-rootfs-v1')
+    .then((cache) => cache.match(key))
+    .then((saved) => saved?.headers.get(rootfsDigestHeader) === id ? saved.arrayBuffer() : null);
+  async function restoreRootfsCache(digesting) {
     try {
-      const [cache, digest] = await Promise.all([caches.open('touchHLE-web-rootfs-v1'), ipswDigest(ipsw)]);
+      const [cache, digest] = await Promise.all([caches.open('touchHLE-web-rootfs-v1'), digesting]);
       const restore = async (key, path, id) => {
-        const saved = await cache.match(key);
-        if (saved?.headers.get(rootfsDigestHeader) !== id) return;
-        const bytes = new Uint8Array(await saved.arrayBuffer());
+        const buffer = await take(key.href + ' ' + id, readSaved(key, id));
+        if (!buffer) return false;
         try { Module.FS.mkdir(rootfsDir); } catch (e) {}
-        Module.FS.writeFile(path, bytes, { canOwn: true });
+        Module.FS.writeFile(path, new Uint8Array(buffer), { canOwn: true });
+        return true;
       };
       const restoreData = async () => {
         cache.delete(new URL('data-partition-v1', document.baseURI)).catch(() => {});
-        const saved = await cache.match(dataKey);
-        if (saved?.headers.get(rootfsDigestHeader) !== digest) return;
-        const buffer = await saved.arrayBuffer();
-        try { unpackDir(buffer); } catch (e) { log('Could not restore the data partition.'); }
+        const buffer = await take(dataKey.href + ' ' + digest, readSaved(dataKey, digest));
+        if (!buffer) return null;
+        try { unpackDir(buffer); } catch (e) { log('Could not restore the data partition.'); return null; }
+        return sha256(buffer);
       };
-      await Promise.all([
+      const [rootfs, , data] = await Promise.all([
         restore(rootfsKey, rootfsPath, digest),
         restore(sharedCacheKey, sharedCachePath, digest + ' ' + build),
         restoreData()
       ]);
-      return { cache, digest };
+      return { cache, digest, rootfs, data };
     } catch (err) {
       log('Root filesystem cache unavailable; booting without it.');
       return null;
@@ -218,8 +269,9 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     const fs = Module.FS;
     const entries = [];
     const files = [];
+    // Sorted, so the same files always pack to the same bytes.
     const walk = (path) => {
-      for (const name of fs.readdir(path)) {
+      for (const name of fs.readdir(path).sort()) {
         if (name === '.' || name === '..') continue;
         const child = path + '/' + name;
         const mode = fs.lstat(child).mode;
@@ -283,6 +335,57 @@ enter the root filesystem key for your own firmware. This browser remembers it a
       headers: { [rootfsDigestHeader]: id }
     }));
   }
+  // ?snapshot=save boots and keeps the lock screen in this browser's storage;
+  // ?snapshot=restore starts from it when the same IPSW and key are picked.
+  const snapshotMode = new URLSearchParams(location.search).get('snapshot');
+  const snapshotDir = '/touchHLE-snapshot';
+  const snapshotKey = new URL('snapshot-v1', document.baseURI);
+  const snapshotIdHeader = 'X-TouchHLE-Snapshot';
+  const snapshotDataHeader = 'X-TouchHLE-Snapshot-Data';
+  const snapshotId = (digest, key) => sha256(new TextEncoder().encode([digest, key.toLowerCase(), build].join(':')));
+  const readSnapshot = (digest, key) => async () => {
+    const id = await snapshotId(digest, key);
+    const saved = await (await caches.open('touchHLE-web-snapshot-v1')).match(snapshotKey);
+    if (saved?.headers.get(snapshotIdHeader) !== id) return null;
+    const raw = await new Response(saved.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+    return { raw, data: saved.headers.get(snapshotDataHeader) };
+  };
+  try {
+    const last = localStorage.getItem(lastIpswStorage);
+    if (last) {
+      for (const [key, id] of [[rootfsKey, last], [sharedCacheKey, last + ' ' + build], [dataKey, last]]) {
+        prefetch(key.href + ' ' + id, readSaved(key, id));
+      }
+      if (snapshotMode === 'restore') prefetch(['snapshot', last, enteredKey()].join(' '), readSnapshot(last, enteredKey()));
+    }
+  } catch (e) {}
+  async function prepareSnapshot({ digest, data }, saved) {
+    const id = await snapshotId(digest, enteredKey());
+    const cache = await caches.open('touchHLE-web-snapshot-v1');
+    Module.FS.mkdir(snapshotDir);
+    // The snapshot holds its own copy of the data partition, so it only fits
+    // while the saved partition is still that copy.
+    if (saved && saved.data === data) {
+      Module.FS.writeFile(snapshotDir + '/restore.bin', new Uint8Array(saved.raw), { canOwn: true });
+      log(`snapshot: read ${saved.raw.byteLength >> 20} MiB`);
+    } else if (saved) {
+      log('snapshot: the data partition changed since the snapshot; booting.');
+    }
+    Module.FS.writeFile(snapshotDir + '/save', '');
+    window.touchHLESnapshotSave = async (ptr, len) => {
+      const start = performance.now();
+      const raw = new Blob([HEAPU8.subarray(ptr, ptr + len)]);
+      try {
+        const disk = packDir(dataDir);
+        const packed = await new Response(raw.stream().pipeThrough(new CompressionStream('gzip'))).blob();
+        const headers = { [snapshotIdHeader]: id, [snapshotDataHeader]: await sha256(await disk.arrayBuffer()) };
+        await cache.put(snapshotKey, new Response(packed, { headers }));
+        log(`snapshot: stored ${packed.size >> 20} MiB in ${Math.round(performance.now() - start)} ms`);
+      } catch (e) {
+        log('Could not save the snapshot: ' + e.message);
+      }
+    };
+  }
   async function launch(file, dir, args) {
     input.disabled = true;
     ipswInput.disabled = true;
@@ -294,8 +397,14 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     installLabel.classList.add('disabled');
     statusEl.textContent = 'Loading ' + file.name + '…';
     const booting = dir === '/touchHLE_ipsw';
-    const restoring = booting && restoreRootfsCache(file);
-    const data = new Uint8Array(await file.arrayBuffer());
+    const snapshotting = booting && snapshotMode && !installInput.files.length;
+    const digesting = booting && ipswDigest(file);
+    const key = enteredKey();
+    const restoring = booting && restoreRootfsCache(digesting);
+    const reading = snapshotting && snapshotMode === 'restore' &&
+      digesting.then((digest) => take(['snapshot', digest, key].join(' '), readSnapshot(digest, key))).catch(() => null);
+    const persistent = booting && await restoring;
+    const data = persistent?.rootfs && await ipswStub(file).catch(() => null) || new Uint8Array(await file.arrayBuffer());
     const path = dir + '/' + file.name.replace(/[^A-Za-z0-9._-]/g, '_');
     try { Module.FS.mkdir(dir); } catch (e) {}
     Module.FS.writeFile(path, data, { canOwn: true });
@@ -303,10 +412,15 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     let saveData = null;
     let dataSaveTimer = 0;
     if (booting) {
-      const persistent = await restoring;
+      if (snapshotting && persistent) {
+        await prepareSnapshot(persistent, await reading).catch(() => log('Snapshot unavailable; booting without it.'));
+      }
       window.touchHLEFirmwareReady = (extracted) => {
         firmwareReady = true;
-        try { localStorage.setItem(keyStorage, enteredKey()); } catch (e) {}
+        try {
+          localStorage.setItem(keyStorage, enteredKey());
+          if (persistent) localStorage.setItem(lastIpswStorage, persistent.digest);
+        } catch (e) {}
         Module.FS.unlink(path);
         Module['touchHLEFastStart'] = true;
         statusEl.textContent = 'Starting SpringBoard…';
@@ -359,6 +473,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         statusEl.textContent = on ? 'Running ' + file.name : 'Screen off. Tap it or press Home to wake it.';
       };
     }
+    early.clear();
     Module.canvas.style.display = 'block';
     Module.canvas.focus();
     if (dir === '/touchHLE_ipsw') homeButton.style.display = 'block';

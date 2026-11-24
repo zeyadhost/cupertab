@@ -852,6 +852,17 @@ fn mbx_method(k: &mut Kernel, selector: u32, scalars: &[u64]) -> Option<(Vec<u64
     })
 }
 
+/// A 32-bit surface as MBX2D draws it: address, bytes per row, width and
+/// height.
+type MbxSurface = (u32, u32, u32, u32);
+
+fn mbx_surface(k: &Kernel, id: u32) -> Option<MbxSurface> {
+    id.checked_sub(1)
+        .and_then(|i| k.iokit.surfaces.get(i as usize))
+        .filter(|s| s.bytes_per_element == 4)
+        .map(|s| (s.addr, s.bytes_per_row, s.width, s.height))
+}
+
 /// Runs the 2D packets MBX2D wrote: each is a byte length followed by that
 /// many bytes. Only solid fills (raster op 0xF0, pattern copy) are drawn so
 /// far; their words are the packet type 4, flags, the destination surface,
@@ -873,8 +884,10 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
             }
         }
         if w.len() >= 15 && w[0] == 4 && w[11] & 0xff == 0xf0 {
-            let corner = |v: u32| (v >> 16, v & 0xffff);
-            mbx_fill(k, w[4], w[12], corner(w[13]), corner(w[14]));
+            if let Some(s) = mbx_surface(k, w[4]) {
+                let corner = |v: u32| (v >> 16, v & 0xffff);
+                mbx_fill(&mut k.mem, s, w[12], corner(w[13]), corner(w[14]));
+            }
         }
         // Copy, raster op 0xCC: source and destination surface IDs, the
         // source origin (x in bits 14-23, y below) and destination corners.
@@ -882,16 +895,20 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
         // the raster op, whose bit 17 enables premultiplied source-over.
         let rop_at = if w.get(1) == Some(&0x48) { 14 } else { 12 };
         if w.len() >= rop_at + 4 && w[0] == 5 && w[rop_at] & 0xff == 0xcc {
-            let corner = |v: u32| (v >> 16, v & 0xffff);
-            let src_origin = ((w[10] >> 14) & 0x3ff, w[10] & 0x3fff);
-            let blend = w[rop_at] & 0x20000 != 0;
-            let (c0, c1) = (corner(w[rop_at + 2]), corner(w[rop_at + 3]));
-            mbx_copy(k, w[4], w[5], src_origin, c0, c1, blend);
+            if let (Some(src), Some(dst)) = (mbx_surface(k, w[4]), mbx_surface(k, w[5])) {
+                let corner = |v: u32| (v >> 16, v & 0xffff);
+                let src_origin = ((w[10] >> 14) & 0x3ff, w[10] & 0x3fff);
+                let blend = w[rop_at] & 0x20000 != 0;
+                let (c0, c1) = (corner(w[rop_at + 2]), corner(w[rop_at + 3]));
+                mbx_copy(&mut k.mem, src, dst, src_origin, c0, c1, blend);
+            }
         }
         // Textured quads: type 9, and type 8 with the same layout up to the
         // modulation color.
         if w.len() >= 44 && (w[0] == 8 || w[0] == 9) {
-            mbx_draw_quad(k, &w);
+            if let (Some(src), Some(dst)) = (mbx_surface(k, w[4]), mbx_surface(k, w[5])) {
+                mbx_draw_quad(&mut k.mem, src, dst, &w);
+            }
         }
         at += 4 + n;
     }
@@ -901,17 +918,8 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
 /// source and destination surface IDs, the destination bounds, then four
 /// strip-ordered vertices and their texture coordinates, normalized to the
 /// texture's padded size, and an RGBA modulation color.
-fn mbx_draw_quad(k: &mut Kernel, w: &[u32]) {
+fn mbx_draw_quad(mem: &mut Mem, src: MbxSurface, dst: MbxSurface, w: &[u32]) {
     let f = |i: usize| f32::from_bits(w[i]);
-    let surface = |id: u32| {
-        id.checked_sub(1)
-            .and_then(|i| k.iokit.surfaces.get(i as usize))
-            .filter(|s| s.bytes_per_element == 4)
-            .map(|s| (s.addr, s.bytes_per_row, s.width, s.height))
-    };
-    let (Some(src), Some(dst)) = (surface(w[4]), surface(w[5])) else {
-        return;
-    };
     if src.2 == 0 || src.3 == 0 {
         return;
     }
@@ -924,6 +932,7 @@ fn mbx_draw_quad(k: &mut Kernel, w: &[u32]) {
         return;
     }
     let (t0, t1, t2) = (t(0), t(1), t(2));
+    let (du, dv) = ((t1.0 - t0.0, t2.0 - t0.0), (t1.1 - t0.1, t2.1 - t0.1));
     let norm = ((src.1 / 4) as f32, src.3.next_power_of_two() as f32);
     let color = [f(40), f(41), f(42), f(43)];
     let clip = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
@@ -932,110 +941,188 @@ fn mbx_draw_quad(k: &mut Kernel, w: &[u32]) {
     if x0 == x1 || y0 == y1 {
         return;
     }
-    let row_bytes = (x1 - x0) * 4;
-    let mut row = vec![0; row_bytes as usize];
-    for y in y0..y1 {
-        let start = Ptr::from_bits(dst.0 + y * dst.1 + x0 * 4);
-        row.copy_from_slice(k.mem.bytes_at(start.cast_const(), row_bytes));
-        for (x, px) in (x0..x1).zip(row.chunks_mut(4)) {
-            let d = (x as f32 + 0.5 - p0.0, y as f32 + 0.5 - p0.1);
-            let a = (d.0 * e2.1 - d.1 * e2.0) / det;
-            let b = (e1.0 * d.1 - e1.1 * d.0) / det;
-            if !(0.0..=1.0).contains(&a) || !(0.0..=1.0).contains(&b) {
-                continue;
-            }
-            let u = t0.0 + a * (t1.0 - t0.0) + b * (t2.0 - t0.0);
-            let v = t0.1 + a * (t1.1 - t0.1) + b * (t2.1 - t0.1);
-            let tx = ((u * norm.0) as i64).clamp(0, src.2 as i64 - 1) as u32;
-            let ty = ((v * norm.1) as i64).clamp(0, src.3 as i64 - 1) as u32;
-            let s = read_u32(&k.mem, src.0 + ty * src.1 + tx * 4).to_le_bytes();
-            let alpha = s[3] as f32 / 255.0 * color[3];
+    let inside = |v: f32| (0.0..=1.0).contains(&v);
+    let bary = |x: u32, y: u32| {
+        let d = (x as f32 + 0.5 - p0.0, y as f32 + 0.5 - p0.1);
+        let a = (d.0 * e2.1 - d.1 * e2.0) / det;
+        let b = (e1.0 * d.1 - e1.1 * d.0) / det;
+        (a, b)
+    };
+    let texel = |a: f32, b: f32| {
+        let u = t0.0 + a * du.0 + b * du.1;
+        let v = t0.1 + a * dv.0 + b * dv.1;
+        let tx = ((u * norm.0) as i64).clamp(0, src.2 as i64 - 1) as u32;
+        let ty = ((v * norm.1) as i64).clamp(0, src.3 as i64 - 1) as u32;
+        (tx, ty)
+    };
+    // One minus the modulated alpha, by source alpha. The blend leaves a
+    // clear texel's pixel as it was if the color is finite, and gives an
+    // opaque texel as it is if the color is white.
+    let keep: [f32; 256] = std::array::from_fn(|a| 1.0 - a as f32 / 255.0 * color[3]);
+    let skip_clear = color.iter().all(|c| c.is_finite());
+    let copy_opaque = color == [1.0; 4];
+    let put = |px: &mut [u8; 4], s: [u8; 4]| {
+        let keep = keep[s[3] as usize];
+        if copy_opaque && keep == 0.0 {
+            *px = s;
+        } else if !(skip_clear && s == [0; 4]) {
             // BGRA source, RGBA modulation color.
-            let c = [
-                s[0] as f32 * color[2],
-                s[1] as f32 * color[1],
-                s[2] as f32 * color[0],
-                s[3] as f32 * color[3],
-            ];
-            for i in 0..4 {
-                px[i] = (c[i] + px[i] as f32 * (1.0 - alpha))
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
+            for (i, c) in [2, 1, 0, 3].into_iter().enumerate() {
+                px[i] = round_u8(s[i] as f32 * color[c] + px[i] as f32 * keep);
             }
         }
-        k.mem.bytes_at_mut(start, row_bytes).copy_from_slice(&row);
+    };
+    // With the quad and its texture axis-aligned, `a` and the texel column
+    // depend only on x, and `b` and the texel row only on y.
+    let separable = e1.1 == 0.0 && e2.0 == 0.0 && du.1 == 0.0 && dv.0 == 0.0 && src.2 <= src.1 / 4;
+    let (mut xs, mut txs) = (Vec::new(), Vec::new());
+    if separable {
+        for x in x0..x1 {
+            let a = bary(x, y0).0;
+            if inside(a) {
+                xs.push((x - x0) as usize);
+                txs.push(texel(a, 0.0).0);
+            }
+        }
+        if xs.is_empty() {
+            return;
+        }
+    }
+    let lo = txs.iter().copied().min().unwrap_or(0);
+    let hi = txs.iter().copied().max().unwrap_or(0);
+    let run = separable
+        && xs.windows(2).all(|x| x[1] == x[0] + 1)
+        && txs.windows(2).all(|t| t[1] == t[0] + 1);
+    let mut texels = Vec::with_capacity((x1 - x0) as usize);
+    for y in y0..y1 {
+        texels.clear();
+        if separable {
+            let b = bary(x0, y).1;
+            if !inside(b) {
+                continue;
+            }
+            let at = Ptr::<u8, false>::from_bits(src.0 + texel(0.0, b).1 * src.1 + lo * 4);
+            let line = mem.bytes_at(at, (hi - lo + 1) * 4).as_chunks::<4>().0;
+            if run {
+                texels.extend_from_slice(line);
+            } else {
+                texels.extend(txs.iter().map(|&tx| line[(tx - lo) as usize]));
+            }
+        } else {
+            xs.clear();
+            for x in x0..x1 {
+                let (a, b) = bary(x, y);
+                if inside(a) && inside(b) {
+                    let (tx, ty) = texel(a, b);
+                    xs.push((x - x0) as usize);
+                    texels.push(read_u32(mem, src.0 + ty * src.1 + tx * 4).to_le_bytes());
+                }
+            }
+        }
+        let at = Ptr::from_bits(dst.0 + y * dst.1 + x0 * 4);
+        let row = mem.bytes_at_mut(at, (x1 - x0) * 4).as_chunks_mut::<4>().0;
+        if run {
+            for (px, &s) in row[xs[0]..].iter_mut().zip(&texels) {
+                put(px, s);
+            }
+        } else {
+            for (&i, &s) in xs.iter().zip(&texels) {
+                put(&mut row[i], s);
+            }
+        }
     }
 }
 
+/// `v.round().clamp(0.0, 255.0) as u8`, without a call to `roundf`.
+fn round_u8(v: f32) -> u8 {
+    if v.is_nan() || v <= 0.0 {
+        return 0;
+    }
+    if v >= 255.0 {
+        return 255;
+    }
+    let t = v as u8;
+    t + (v - t as f32 >= 0.5) as u8
+}
+
 fn mbx_copy(
-    k: &mut Kernel,
-    src_id: u32,
-    dst_id: u32,
+    mem: &mut Mem,
+    src: MbxSurface,
+    dst: MbxSurface,
     (sx, sy): (u32, u32),
     (x0, y0): (u32, u32),
     (x1, y1): (u32, u32),
     blend: bool,
 ) {
-    let surface = |id: u32| {
-        id.checked_sub(1)
-            .and_then(|i| k.iokit.surfaces.get(i as usize))
-            .filter(|s| s.bytes_per_element == 4)
-            .map(|s| (s.addr, s.bytes_per_row, s.width, s.height))
-    };
-    let (Some(src), Some(dst)) = (surface(src_id), surface(dst_id)) else {
-        return;
-    };
     let x1 = x1.min(dst.2).min((x0 + src.2).saturating_sub(sx));
     let y1 = y1.min(dst.3).min((y0 + src.3).saturating_sub(sy));
     if x0 >= x1 || y0 >= y1 {
         return;
     }
-    // Read the whole rectangle first, as it may overlap within one surface.
     let row_bytes = (x1 - x0) * 4;
-    let mut pixels = Vec::with_capacity(row_bytes as usize * (y1 - y0) as usize);
-    for y in y0..y1 {
-        let at = Ptr::<u8, false>::from_bits(src.0 + (sy + y - y0) * src.1 + sx * 4);
-        pixels.extend_from_slice(k.mem.bytes_at(at, row_bytes));
-    }
-    for (y, row) in (y0..y1).zip(pixels.chunks_exact(row_bytes as usize)) {
-        let at = Ptr::from_bits(dst.0 + y * dst.1 + x0 * 4);
-        let under = k.mem.bytes_at_mut(at, row_bytes);
-        if blend {
+    let src_row = |y: u32| Ptr::<u8, false>::from_bits(src.0 + (sy + y - y0) * src.1 + sx * 4);
+    let dst_row = |y: u32| Ptr::<u8, true>::from_bits(dst.0 + y * dst.1 + x0 * 4);
+    // The host bytes from the first row to the end of the last, if the rows
+    // between lie in them.
+    let span = |first: Ptr<u8, false>, last: Ptr<u8, false>, stride: u32| {
+        let first = mem.bytes_at(first, row_bytes).as_ptr() as u64;
+        let last = mem.bytes_at(last, row_bytes).as_ptr() as u64;
+        let len = u64::from(y1 - y0 - 1) * u64::from(stride);
+        (last.wrapping_sub(first) == len).then_some(first..last + u64::from(row_bytes))
+    };
+    let s = span(src_row(y0), src_row(y1 - 1), src.1);
+    let d = span(
+        dst_row(y0).cast_const(),
+        dst_row(y1 - 1).cast_const(),
+        dst.1,
+    );
+    // Rows go one at a time unless the rectangles may share memory, which
+    // needs the whole source read first.
+    let band = match (s, d) {
+        (Some(s), Some(d)) if s.end <= d.start || d.end <= s.start => 1,
+        _ => y1 - y0,
+    };
+    let mut pixels = Vec::with_capacity(row_bytes as usize * band as usize);
+    for top in (y0..y1).step_by(band as usize) {
+        pixels.clear();
+        for y in top..top + band {
+            pixels.extend_from_slice(mem.bytes_at(src_row(y), row_bytes));
+        }
+        for (y, row) in (top..).zip(pixels.chunks_exact(row_bytes as usize)) {
+            let under = mem.bytes_at_mut(dst_row(y), row_bytes);
+            if !blend {
+                under.copy_from_slice(row);
+                continue;
+            }
             for (s, d) in row
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .zip(under.as_chunks_mut::<4>().0)
             {
-                let inv = 255 - s[3] as u32;
-                for i in 0..4 {
-                    d[i] = (s[i] as u32 + (d[i] as u32 * inv + 127) / 255).min(255) as u8;
+                match s[3] {
+                    255 => *d = *s,
+                    0 if *s == [0; 4] => {}
+                    _ => {
+                        let inv = 255 - s[3] as u32;
+                        for i in 0..4 {
+                            d[i] = (s[i] as u32 + (d[i] as u32 * inv + 127) / 255).min(255) as u8;
+                        }
+                    }
                 }
             }
-        } else {
-            under.copy_from_slice(row);
         }
     }
 }
 
-fn mbx_fill(k: &mut Kernel, id: u32, color: u32, (x0, y0): (u32, u32), (x1, y1): (u32, u32)) {
-    let Some(s) = id
-        .checked_sub(1)
-        .and_then(|i| k.iokit.surfaces.get(i as usize))
-    else {
-        return;
-    };
-    if s.bytes_per_element != 4 {
-        return;
-    }
-    let (x1, y1) = (x1.min(s.width), y1.min(s.height));
+fn mbx_fill(mem: &mut Mem, s: MbxSurface, color: u32, (x0, y0): (u32, u32), (x1, y1): (u32, u32)) {
+    let (x1, y1) = (x1.min(s.2), y1.min(s.3));
     if x0 >= x1 {
         return;
     }
-    let row: Vec<u8> = (x0..x1).flat_map(|_| color.to_le_bytes()).collect();
-    let (addr, bytes_per_row) = (s.addr, s.bytes_per_row);
+    let row = color.to_le_bytes().repeat((x1 - x0) as usize);
     for y in y0..y1 {
-        write_bytes(&mut k.mem, addr + y * bytes_per_row + x0 * 4, &row);
+        write_bytes(mem, s.0 + y * s.1 + x0 * 4, &row);
     }
 }
 
@@ -1309,4 +1396,626 @@ fn hid_enqueue(mem: &mut Mem, addr: u32, data: &[u8]) -> bool {
     write_bytes(mem, addr + 16 + at, data);
     write_u32(mem, addr + 8, at + entry);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xnu::read_bytes;
+
+    fn old_draw_quad(mem: &mut Mem, src: MbxSurface, dst: MbxSurface, w: &[u32]) {
+        let f = |i: usize| f32::from_bits(w[i]);
+        if src.2 == 0 || src.3 == 0 {
+            return;
+        }
+        let p = |i: usize| (f(21 + 2 * i), f(22 + 2 * i));
+        let t = |i: usize| (f(29 + 2 * i), f(30 + 2 * i));
+        let (p0, p1, p2) = (p(0), p(1), p(2));
+        let (e1, e2) = ((p1.0 - p0.0, p1.1 - p0.1), (p2.0 - p0.0, p2.1 - p0.1));
+        let det = e1.0 * e2.1 - e1.1 * e2.0;
+        if det == 0.0 || !det.is_finite() {
+            return;
+        }
+        let (t0, t1, t2) = (t(0), t(1), t(2));
+        let norm = ((src.1 / 4) as f32, src.3.next_power_of_two() as f32);
+        let color = [f(40), f(41), f(42), f(43)];
+        let clip = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
+        let (x0, y0) = (clip(f(6).min(f(8)), dst.2), clip(f(7).min(f(9)), dst.3));
+        let (x1, y1) = (clip(f(6).max(f(8)), dst.2), clip(f(7).max(f(9)), dst.3));
+        if x0 == x1 || y0 == y1 {
+            return;
+        }
+        let row_bytes = (x1 - x0) * 4;
+        let mut row = vec![0; row_bytes as usize];
+        for y in y0..y1 {
+            let start = Ptr::from_bits(dst.0 + y * dst.1 + x0 * 4);
+            row.copy_from_slice(mem.bytes_at(start.cast_const(), row_bytes));
+            for (x, px) in (x0..x1).zip(row.chunks_mut(4)) {
+                let d = (x as f32 + 0.5 - p0.0, y as f32 + 0.5 - p0.1);
+                let a = (d.0 * e2.1 - d.1 * e2.0) / det;
+                let b = (e1.0 * d.1 - e1.1 * d.0) / det;
+                if !(0.0..=1.0).contains(&a) || !(0.0..=1.0).contains(&b) {
+                    continue;
+                }
+                let u = t0.0 + a * (t1.0 - t0.0) + b * (t2.0 - t0.0);
+                let v = t0.1 + a * (t1.1 - t0.1) + b * (t2.1 - t0.1);
+                let tx = ((u * norm.0) as i64).clamp(0, src.2 as i64 - 1) as u32;
+                let ty = ((v * norm.1) as i64).clamp(0, src.3 as i64 - 1) as u32;
+                let s = read_u32(mem, src.0 + ty * src.1 + tx * 4).to_le_bytes();
+                let alpha = s[3] as f32 / 255.0 * color[3];
+                let c = [
+                    s[0] as f32 * color[2],
+                    s[1] as f32 * color[1],
+                    s[2] as f32 * color[0],
+                    s[3] as f32 * color[3],
+                ];
+                for i in 0..4 {
+                    px[i] = (c[i] + px[i] as f32 * (1.0 - alpha))
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
+            mem.bytes_at_mut(start, row_bytes).copy_from_slice(&row);
+        }
+    }
+
+    fn old_copy(
+        mem: &mut Mem,
+        src: MbxSurface,
+        dst: MbxSurface,
+        (sx, sy): (u32, u32),
+        (x0, y0): (u32, u32),
+        (x1, y1): (u32, u32),
+        blend: bool,
+    ) {
+        let x1 = x1.min(dst.2).min((x0 + src.2).saturating_sub(sx));
+        let y1 = y1.min(dst.3).min((y0 + src.3).saturating_sub(sy));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let row_bytes = (x1 - x0) * 4;
+        let mut pixels = Vec::with_capacity(row_bytes as usize * (y1 - y0) as usize);
+        for y in y0..y1 {
+            let at = Ptr::<u8, false>::from_bits(src.0 + (sy + y - y0) * src.1 + sx * 4);
+            pixels.extend_from_slice(mem.bytes_at(at, row_bytes));
+        }
+        for (y, row) in (y0..y1).zip(pixels.chunks_exact(row_bytes as usize)) {
+            let at = Ptr::from_bits(dst.0 + y * dst.1 + x0 * 4);
+            let under = mem.bytes_at_mut(at, row_bytes);
+            if blend {
+                for (s, d) in row
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(under.as_chunks_mut::<4>().0)
+                {
+                    let inv = 255 - s[3] as u32;
+                    for i in 0..4 {
+                        d[i] = (s[i] as u32 + (d[i] as u32 * inv + 127) / 255).min(255) as u8;
+                    }
+                }
+            } else {
+                under.copy_from_slice(row);
+            }
+        }
+    }
+
+    fn old_fill(
+        mem: &mut Mem,
+        s: MbxSurface,
+        color: u32,
+        (x0, y0): (u32, u32),
+        (x1, y1): (u32, u32),
+    ) {
+        let (x1, y1) = (x1.min(s.2), y1.min(s.3));
+        if x0 >= x1 {
+            return;
+        }
+        let row: Vec<u8> = (x0..x1).flat_map(|_| color.to_le_bytes()).collect();
+        for y in y0..y1 {
+            write_bytes(mem, s.0 + y * s.1 + x0 * 4, &row);
+        }
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 32) as u32
+        }
+        fn below(&mut self, n: u32) -> u32 {
+            self.next() % n
+        }
+        fn unit(&mut self) -> f32 {
+            (self.next() >> 8) as f32 / (1 << 24) as f32
+        }
+        fn pick<T: Copy>(&mut self, v: &[T]) -> T {
+            v[self.below(v.len() as u32) as usize]
+        }
+        fn pixel(&mut self) -> [u8; 4] {
+            let [b, g, r, a] = self.next().to_le_bytes();
+            let pm = |c: u8, a: u8| (c as u32 * a as u32 / 255) as u8;
+            match self.below(8) {
+                0 | 1 => [0; 4],
+                2 | 3 => [b, g, r, 255],
+                4 | 5 => [pm(b, a), pm(g, a), pm(r, a), a],
+                6 => [b, g, r, 0],
+                _ => [b, g, r, a],
+            }
+        }
+    }
+
+    const ARENA: u32 = 0x1000_0000;
+    const ARENA_SIZE: u32 = 1 << 20;
+
+    /// Fresh surfaces with random pixels, packed into the arena from `at`.
+    fn surface(rng: &mut Rng, mem: &mut Mem, at: &mut u32, max: u32) -> MbxSurface {
+        let (w, h) = (1 + rng.below(max), 1 + rng.below(max));
+        let bpr = match rng.below(10) {
+            0 => (w * 4 - rng.below(w * 4)).max(4),
+            1 => (w * 4).next_multiple_of(16) + 16 * (1 + rng.below(4)),
+            _ => (w * 4).next_multiple_of(16),
+        };
+        let s = (*at, bpr, w, h);
+        let size = bpr * h + w * 4;
+        let pixels: Vec<u8> = (0..size / 4).flat_map(|_| rng.pixel()).collect();
+        write_bytes(mem, *at, &pixels);
+        *at += size.next_multiple_of(64) + 64 * rng.below(2);
+        assert!(*at < ARENA + ARENA_SIZE);
+        s
+    }
+
+    fn quad_packet(
+        p: [(f32, f32); 4],
+        t: [(f32, f32); 4],
+        bounds: [f32; 4],
+        color: [f32; 4],
+    ) -> Vec<u32> {
+        let mut w = vec![0; 44];
+        w[0] = 9;
+        for i in 0..4 {
+            w[6 + i] = bounds[i].to_bits();
+            w[21 + 2 * i] = p[i].0.to_bits();
+            w[22 + 2 * i] = p[i].1.to_bits();
+            w[29 + 2 * i] = t[i].0.to_bits();
+            w[30 + 2 * i] = t[i].1.to_bits();
+            w[40 + i] = color[i].to_bits();
+        }
+        w
+    }
+
+    fn random_quad(rng: &mut Rng, src: MbxSurface, dst: MbxSurface) -> Vec<u32> {
+        let norm = ((src.1 / 4) as f32, src.3.next_power_of_two() as f32);
+        let fraction = [
+            0.5, 0.25, 0.75, 0.1, 0.9, 0.49999997, 0.50000006, 0.99999994,
+        ];
+        let coord = |rng: &mut Rng, max: u32| {
+            let v = rng.below(max + 16) as f32 - 8.0;
+            match rng.below(4) {
+                0 => v + rng.pick(&fraction),
+                1 => v + rng.unit(),
+                _ => v,
+            }
+        };
+        let (x, y) = (coord(rng, dst.2), coord(rng, dst.3));
+        let kind = rng.below(10);
+        let (w, h, u0, v0, u1, v1) = if kind < 5 {
+            let (w, h) = (1 + rng.below(src.2), 1 + rng.below(src.3));
+            let (u, v) = (rng.below(src.2 + 1 - w), rng.below(src.3 + 1 - h));
+            let (u, v, w, h) = (u as f32, v as f32, w as f32, h as f32);
+            (w, h, u, v, u + w, v + h)
+        } else {
+            let size = |rng: &mut Rng, max: u32| 0.5 + rng.unit() * 1.5 * max as f32;
+            let tex = |rng: &mut Rng, max: u32| rng.unit() * (max + 4) as f32 - 2.0;
+            let (w, h) = (size(rng, dst.2), size(rng, dst.3));
+            let (u0, u1) = (tex(rng, src.2), tex(rng, src.2));
+            let (v0, v1) = (tex(rng, src.3), tex(rng, src.3));
+            (w, h, u0, v0, u1, v1)
+        };
+        let angle = match kind {
+            7 => rng.unit() * std::f32::consts::TAU,
+            8 => rng.below(4) as f32 * std::f32::consts::FRAC_PI_2,
+            _ => 0.0,
+        };
+        let p = if angle == 0.0 {
+            [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
+        } else {
+            let (sin, cos) = angle.sin_cos();
+            let c = (x + w / 2.0, y + h / 2.0);
+            [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(i, j): (f32, f32)| {
+                let (dx, dy) = (i * w / 2.0, j * h / 2.0);
+                (c.0 + dx * cos - dy * sin, c.1 + dx * sin + dy * cos)
+            })
+        };
+        let t = [(u0, v0), (u1, v0), (u0, v1), (u1, v1)].map(|(u, v)| (u / norm.0, v / norm.1));
+        let (lo, hi) = p.iter().fold(
+            ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN)),
+            |(lo, hi), q| {
+                (
+                    (lo.0.min(q.0), lo.1.min(q.1)),
+                    (hi.0.max(q.0), hi.1.max(q.1)),
+                )
+            },
+        );
+        let bounds = match rng.below(6) {
+            0 => [0.0, 0.0, dst.2 as f32 + 5.0, dst.3 as f32 + 5.0],
+            1 => [hi.0, hi.1, lo.0, lo.1],
+            2 => [
+                lo.0 + rng.unit() * 4.0,
+                lo.1 - 1.0,
+                hi.0 - rng.unit() * 4.0,
+                hi.1 + 1.5,
+            ],
+            _ => [lo.0, lo.1, hi.0, hi.1],
+        };
+        let o = rng.unit();
+        let color = match rng.below(8) {
+            0..=3 => [1.0; 4],
+            4 => [o; 4],
+            5 => [1.0, 1.0, 1.0, o],
+            6 => [rng.unit(), rng.unit(), rng.unit(), rng.unit()],
+            _ => {
+                let special = [
+                    f32::NAN,
+                    f32::INFINITY,
+                    -f32::INFINITY,
+                    -0.0,
+                    0.0,
+                    2.0,
+                    -1.0,
+                    1.0000001,
+                    0.99999994,
+                ];
+                let mut c = [1.0; 4];
+                c[rng.below(4) as usize] = rng.pick(&special);
+                c
+            }
+        };
+        let mut w = quad_packet(p, t, bounds, color);
+        if kind == 6 {
+            let i = rng.pick(&[21, 22, 23, 24, 25, 26, 29, 30, 31, 32, 33, 34]);
+            w[i] = w[i].wrapping_add(rng.pick(&[1, u32::MAX]));
+        }
+        if kind == 9 {
+            let special = [
+                f32::NAN,
+                f32::INFINITY,
+                -f32::INFINITY,
+                -0.0,
+                0.0,
+                1e30,
+                -1e30,
+                1e-30,
+            ];
+            for _ in 0..1 + rng.below(3) {
+                let i = rng.pick(&[
+                    6, 7, 8, 9, 21, 22, 23, 24, 25, 26, 29, 30, 31, 32, 33, 34, 40, 41, 42, 43,
+                ]);
+                w[i] = match rng.below(3) {
+                    0 => rng.next(),
+                    _ => rng.pick(&special).to_bits(),
+                };
+            }
+        }
+        w
+    }
+
+    /// Runs `old` and `new` on the same arena and compares every byte.
+    fn same(
+        mem: &mut Mem,
+        case: impl std::fmt::Debug,
+        old: impl FnOnce(&mut Mem),
+        new: impl FnOnce(&mut Mem),
+    ) {
+        let before = read_bytes(mem, ARENA, ARENA_SIZE);
+        old(mem);
+        let want = read_bytes(mem, ARENA, ARENA_SIZE);
+        write_bytes(mem, ARENA, &before);
+        new(mem);
+        let got = read_bytes(mem, ARENA, ARENA_SIZE);
+        if let Some(i) = (0..want.len()).find(|&i| want[i] != got[i]) {
+            panic!(
+                "{case:x?}: byte {:#x} is {:#x}, not {:#x}",
+                ARENA + i as u32,
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn mbx_draw_quad_matches_reference() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut mem = Mem::new();
+        for case in 0..6000 {
+            let mut at = ARENA;
+            let max = if case % 16 == 0 { 160 } else { 40 };
+            let src = surface(&mut rng, &mut mem, &mut at, max);
+            let dst = if rng.below(8) == 0 {
+                src
+            } else {
+                surface(&mut rng, &mut mem, &mut at, max)
+            };
+            let w = random_quad(&mut rng, src, dst);
+            same(
+                &mut mem,
+                (case, src, dst, &w),
+                |mem| old_draw_quad(mem, src, dst, &w),
+                |mem| mbx_draw_quad(mem, src, dst, &w),
+            );
+        }
+    }
+
+    #[test]
+    fn mbx_copy_and_fill_match_reference() {
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        let mut mem = Mem::new();
+        for case in 0..4000 {
+            let mut at = ARENA;
+            let max = if case % 16 == 0 { 160 } else { 40 };
+            let src = surface(&mut rng, &mut mem, &mut at, max);
+            let dst = match rng.below(6) {
+                0 => src,
+                1 => (src.0 + 4 * rng.below(src.2 + 8), src.1, src.2, src.3),
+                2 => (src.0 + rng.below(src.3 + 2) * src.1, src.1, src.2, src.3),
+                _ => surface(&mut rng, &mut mem, &mut at, max),
+            };
+            let point = |rng: &mut Rng, s: MbxSurface| (rng.below(s.2 + 8), rng.below(s.3 + 8));
+            let (c0, c1) = (point(&mut rng, dst), point(&mut rng, dst));
+            if rng.below(4) == 0 {
+                let color = rng.next();
+                same(
+                    &mut mem,
+                    (case, dst, color, c0, c1),
+                    |mem| old_fill(mem, dst, color, c0, c1),
+                    |mem| mbx_fill(mem, dst, color, c0, c1),
+                );
+                continue;
+            }
+            let origin = point(&mut rng, src);
+            let blend = rng.below(3) != 0;
+            same(
+                &mut mem,
+                (case, src, dst, origin, c0, c1, blend),
+                |mem| old_copy(mem, src, dst, origin, c0, c1, blend),
+                |mem| mbx_copy(mem, src, dst, origin, c0, c1, blend),
+            );
+        }
+    }
+
+    #[test]
+    fn round_u8_matches_round_clamp() {
+        let near_halves = (0..=256).flat_map(|k| {
+            let v = k as f32 + 0.5;
+            (-64..=64).flat_map(move |d: i32| {
+                [v, k as f32].map(|v| f32::from_bits(v.to_bits().wrapping_add_signed(d)))
+            })
+        });
+        let spread = (0..u32::MAX / 4099).map(|i| f32::from_bits(i * 4099));
+        let special = [
+            0.0,
+            -0.0,
+            f32::NAN,
+            f32::INFINITY,
+            -f32::INFINITY,
+            f32::MIN_POSITIVE,
+        ];
+        for v in near_halves.chain(spread).chain(special) {
+            assert_eq!(round_u8(v), v.round().clamp(0.0, 255.0) as u8, "{v:e}");
+        }
+    }
+
+    /// Every f32, which takes a while: `cargo test --release round_u8_all
+    /// -- --ignored`.
+    #[test]
+    #[ignore]
+    fn round_u8_all() {
+        for bits in 0..=u32::MAX {
+            let v = f32::from_bits(bits);
+            assert_eq!(round_u8(v), v.round().clamp(0.0, 255.0) as u8, "{v:e}");
+        }
+    }
+
+    /// Old and new speed for typical SpringBoard drawing: `cargo test
+    /// --release mbx_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn mbx_bench() {
+        let mut rng = Rng(0x1234_5678_9abc_def1);
+        let mut mem = Mem::new();
+        type Paint<'a> = &'a mut dyn FnMut(&mut Rng, u32, u32) -> [u8; 4];
+        let mut put = |s: MbxSurface, px: Paint| {
+            for y in 0..s.3 {
+                let row: Vec<u8> = (0..s.1 / 4).flat_map(|x| px(&mut rng, x, y)).collect();
+                write_bytes(&mut mem, s.0 + y * s.1, &row);
+            }
+        };
+        let screen = (ARENA, 1280, 320, 480);
+        let wallpaper = (ARENA + 0x10_0000, 1280, 320, 480);
+        let icon = (ARENA + 0x20_0000, 240, 57, 57);
+        let overlay = (ARENA + 0x30_0000, 1280, 320, 480);
+        put(screen, &mut |rng, _, _| rng.pixel());
+        put(wallpaper, &mut |rng, _, _| {
+            let [b, g, r, _] = rng.next().to_le_bytes();
+            [b, g, r, 255]
+        });
+        // A rounded square: opaque inside, clear corners, soft edges.
+        put(icon, &mut |rng, x, y| {
+            let d = |v: u32| (v as f32 - 28.0).abs() - 18.0;
+            let edge = (d(x).max(0.0).hypot(d(y).max(0.0)) - 10.0).clamp(-1.0, 0.0);
+            let a = (-edge * 255.0) as u32;
+            let [b, g, r, _] = rng.next().to_le_bytes();
+            let pm = |c: u8| (c as u32 * a / 255) as u8;
+            [pm(b), pm(g), pm(r), a as u8]
+        });
+        // A status bar style overlay: mostly clear with a translucent band.
+        put(overlay, &mut |_, _, y| {
+            if y < 20 {
+                [0, 0, 0, 128]
+            } else {
+                [0; 4]
+            }
+        });
+        let quad = |x: f32, y: f32, w: f32, h: f32, s: MbxSurface, angle: f32, color: [f32; 4]| {
+            let norm = ((s.1 / 4) as f32, s.3.next_power_of_two() as f32);
+            let (sin, cos) = angle.sin_cos();
+            let c = (x + w / 2.0, y + h / 2.0);
+            let p =
+                [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(i, j): (f32, f32)| {
+                    let (dx, dy) = (i * w / 2.0, j * h / 2.0);
+                    if angle == 0.0 {
+                        (c.0 + dx, c.1 + dy)
+                    } else {
+                        (c.0 + dx * cos - dy * sin, c.1 + dx * sin + dy * cos)
+                    }
+                });
+            let t = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                .map(|(u, v): (f32, f32)| (u * s.2 as f32 / norm.0, v * s.3 as f32 / norm.1));
+            let (lo, hi) = p.iter().fold(
+                ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN)),
+                |(lo, hi), q| {
+                    (
+                        (lo.0.min(q.0), lo.1.min(q.1)),
+                        (hi.0.max(q.0), hi.1.max(q.1)),
+                    )
+                },
+            );
+            quad_packet(p, t, [lo.0, lo.1, hi.0, hi.1], color)
+        };
+        let white = [1.0; 4];
+        type Case = (&'static str, u32, Box<dyn Fn(&mut Mem, bool)>);
+        let cases: Vec<Case> = vec![
+            (
+                "fill 320x480",
+                320 * 480,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_fill } else { old_fill };
+                    f(mem, screen, 0xff336699, (0, 0), (320, 480))
+                }),
+            ),
+            (
+                "copy 320x480",
+                320 * 480,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_copy } else { old_copy };
+                    f(mem, wallpaper, screen, (0, 0), (0, 0), (320, 480), false)
+                }),
+            ),
+            (
+                "copy blend 320x480 overlay",
+                320 * 480,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_copy } else { old_copy };
+                    f(mem, overlay, screen, (0, 0), (0, 0), (320, 480), true)
+                }),
+            ),
+            (
+                "quad 320x480 wallpaper",
+                320 * 480,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_draw_quad } else { old_draw_quad };
+                    f(
+                        mem,
+                        wallpaper,
+                        screen,
+                        &quad(0.0, 0.0, 320.0, 480.0, wallpaper, 0.0, white),
+                    )
+                }),
+            ),
+            (
+                "quad 320x480 overlay",
+                320 * 480,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_draw_quad } else { old_draw_quad };
+                    f(
+                        mem,
+                        overlay,
+                        screen,
+                        &quad(0.0, 0.0, 320.0, 480.0, overlay, 0.0, white),
+                    )
+                }),
+            ),
+            (
+                "quad 57x57 icon",
+                57 * 57,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_draw_quad } else { old_draw_quad };
+                    f(
+                        mem,
+                        icon,
+                        screen,
+                        &quad(19.0, 40.0, 57.0, 57.0, icon, 0.0, white),
+                    )
+                }),
+            ),
+            (
+                "quad 57x57 icon, 50% opacity",
+                57 * 57,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_draw_quad } else { old_draw_quad };
+                    f(
+                        mem,
+                        icon,
+                        screen,
+                        &quad(19.0, 40.0, 57.0, 57.0, icon, 0.0, [0.5; 4]),
+                    )
+                }),
+            ),
+            (
+                "quad 57x57 icon scaled to 74x74 at x.3",
+                74 * 74,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_draw_quad } else { old_draw_quad };
+                    f(
+                        mem,
+                        icon,
+                        screen,
+                        &quad(19.3, 40.3, 74.1, 74.1, icon, 0.0, white),
+                    )
+                }),
+            ),
+            (
+                "quad 57x57 icon rotated 30 degrees",
+                57 * 57,
+                Box::new(move |mem, new| {
+                    let f = if new { mbx_draw_quad } else { old_draw_quad };
+                    f(
+                        mem,
+                        icon,
+                        screen,
+                        &quad(
+                            19.0,
+                            40.0,
+                            57.0,
+                            57.0,
+                            icon,
+                            std::f32::consts::FRAC_PI_6,
+                            white,
+                        ),
+                    )
+                }),
+            ),
+        ];
+        for (name, pixels, run) in &cases {
+            same(&mut mem, name, |mem| run(mem, false), |mem| run(mem, true));
+            let mut ns = [0.0; 2];
+            for (new, ns) in [false, true].into_iter().zip(&mut ns) {
+                let reps = 20_000_000 / pixels;
+                let start = std::time::Instant::now();
+                for _ in 0..reps {
+                    run(&mut mem, new);
+                }
+                *ns = start.elapsed().as_nanos() as f64 / (reps * pixels) as f64;
+            }
+            println!(
+                "{name}: old {:.2} ns/px, new {:.2} ns/px, {:.1}x",
+                ns[0],
+                ns[1],
+                ns[0] / ns[1]
+            );
+        }
+    }
 }

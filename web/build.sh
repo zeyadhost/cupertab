@@ -11,7 +11,8 @@ if [ ! -f vendor/gl4es/lib/libGL.a ]; then
         make -j"$(nproc)"
     )
 fi
-cargo build --release --target wasm32-unknown-emscripten --no-default-features --bin touchHLE
+CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+    cargo build --release --target wasm32-unknown-emscripten --no-default-features --bin touchHLE
 out=web/dist
 rm -rf "$out"
 mkdir -p "$out"

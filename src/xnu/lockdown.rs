@@ -391,6 +391,7 @@ fn launchd_frames_with(tx: &mut Vec<u8>, rx: &mut VecDeque<u8>, l: &mut Launchd)
 
 pub struct Lockdownd {
     values: Dictionary,
+    disk_usage: Dictionary,
 }
 
 impl Lockdownd {
@@ -417,7 +418,12 @@ impl Lockdownd {
         set("ActivationState", "Activated".into());
         set("ActivationStateAcknowledged", true.into());
         set("BrickState", false.into());
-        Lockdownd { values }
+        // The com.apple.disk_usage domain, which Settings shows as Capacity
+        // and Available: an 8 GB iPhone 3G's data partition, nearly empty.
+        let mut disk_usage = Dictionary::new();
+        disk_usage.insert("TotalDataCapacity".into(), 7_400_000_000u64.into());
+        disk_usage.insert("AmountDataAvailable".into(), 7_300_000_000u64.into());
+        Lockdownd { values, disk_usage }
     }
 
     fn handle(&self, msg: &[u8]) -> Dictionary {
@@ -444,7 +450,11 @@ impl Lockdownd {
                 reply.insert("Type".into(), "com.apple.mobile.lockdown".into());
             }
             "GetValue" => {
-                let domain = (get("Domain").is_none()).then_some(&self.values);
+                let domain = match get("Domain") {
+                    None => Some(&self.values),
+                    Some("com.apple.disk_usage") => Some(&self.disk_usage),
+                    Some(_) => None,
+                };
                 match (get("Key"), domain) {
                     (None, Some(d)) => {
                         reply.insert("Value".into(), Value::Dictionary(d.clone()));

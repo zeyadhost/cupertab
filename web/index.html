@@ -142,6 +142,10 @@ enter the root filesystem key for your own firmware. This browser remembers it a
   const rootfsKey = new URL('rootfs-cache-v1', document.baseURI);
   const sharedCachePath = rootfsDir + '/shared_cache';
   const sharedCacheKey = new URL('shared-cache-v1', document.baseURI);
+  // The guest's data partition, kept between page loads as the native build
+  // keeps it on disk. Without it, every boot is a first boot.
+  const dataDir = '/touchHLE_firmware';
+  const dataKey = new URL('data-partition-v1', document.baseURI);
   const rootfsDigestHeader = 'X-TouchHLE-IPSW-Digest';
   const sha256 = async (bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
     (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -168,11 +172,59 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         try { Module.FS.mkdir(rootfsDir); } catch (e) {}
         Module.FS.writeFile(path, bytes, { canOwn: true });
       };
-      await Promise.all([restore(rootfsKey, rootfsPath), restore(sharedCacheKey, sharedCachePath)]);
+      const restoreData = async () => {
+        const saved = await cache.match(dataKey);
+        if (saved?.headers.get(rootfsDigestHeader) !== digest) return;
+        const buffer = await saved.arrayBuffer();
+        try { unpackDir(buffer); } catch (e) { log('Could not restore the data partition.'); }
+      };
+      await Promise.all([restore(rootfsKey, rootfsPath), restore(sharedCacheKey, sharedCachePath), restoreData()]);
       return { cache, digest };
     } catch (err) {
       log('Root filesystem cache unavailable; booting without it.');
       return null;
+    }
+  }
+  function packDir(dir) {
+    const fs = Module.FS;
+    const entries = [];
+    const files = [];
+    const walk = (path) => {
+      for (const name of fs.readdir(path)) {
+        if (name === '.' || name === '..') continue;
+        const child = path + '/' + name;
+        const mode = fs.lstat(child).mode;
+        if (fs.isDir(mode)) {
+          entries.push([child, -1]);
+          walk(child);
+        } else if (fs.isLink(mode)) {
+          entries.push([child, -2, fs.readlink(child)]);
+        } else if (fs.isFile(mode)) {
+          const bytes = fs.readFile(child);
+          entries.push([child, bytes.length]);
+          files.push(bytes);
+        }
+      }
+    };
+    walk(dir);
+    const header = new TextEncoder().encode(JSON.stringify(entries));
+    return new Blob([new Uint32Array([header.length]), header, ...files]);
+  }
+  function unpackDir(buffer) {
+    const fs = Module.FS;
+    const length = new Uint32Array(buffer, 0, 1)[0];
+    const entries = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)));
+    let offset = 4 + length;
+    fs.mkdirTree(dataDir);
+    for (const [path, size, target] of entries) {
+      if (size === -1) {
+        fs.mkdirTree(path);
+      } else if (size === -2) {
+        fs.symlink(target, path);
+      } else {
+        fs.writeFile(path, new Uint8Array(buffer, offset, size));
+        offset += size;
+      }
     }
   }
   async function saveCacheFile({ cache, digest }, path, key) {
@@ -218,6 +270,8 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     try { Module.FS.mkdir(dir); } catch (e) {}
     Module.FS.writeFile(path, data, { canOwn: true });
     Module['touchHLEFirmware'] = booting;
+    let saveData = null;
+    let dataSaveTimer = 0;
     if (booting) {
       const persistent = await restoring;
       window.touchHLEFirmwareReady = (extracted) => {
@@ -231,6 +285,19 @@ enter the root filesystem key for your own firmware. This browser remembers it a
             .catch(() => log('Could not save the root filesystem cache.'));
         }
       };
+      // A save between two guest time slices sees every file as the guest
+      // left it, like a device that loses power.
+      saveData = () => {
+        if (!persistent || !firmwareReady) return;
+        let data;
+        try { data = packDir(dataDir); } catch (e) { return; }
+        persistent.cache.put(dataKey, new Response(data, {
+          headers: { [rootfsDigestHeader]: persistent.digest }
+        })).catch(() => log('Could not save the data partition.'));
+      };
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') saveData();
+      });
       window.touchHLESharedCacheReady = () => {
         const saving = persistent ? saveCacheFile(persistent, sharedCachePath, sharedCacheKey) : Promise.resolve();
         saving.catch(() => log('Could not save the shared cache.'))
@@ -255,6 +322,8 @@ enter the root filesystem key for your own firmware. This browser remembers it a
       window.touchHLEDisplay = (on) => {
         if (hasStopped) return;
         if (on) Module['touchHLEFastStart'] = false;
+        // Save once the boot has settled, so the next boot is not a first boot.
+        if (on && !dataSaveTimer) dataSaveTimer = setTimeout(saveData, 10000);
         statusEl.textContent = on ? 'Running ' + file.name : 'Screen off. Tap it or press Home to wake it.';
       };
     }

@@ -636,7 +636,8 @@ impl Interp {
                         hold = lsr(hold, extra);
                         bits = bits.wrapping_sub(extra);
                     }
-                    // The guest loads these two bytes whether or not it needs them.
+                    // The guest loads these two bytes whether or not it
+                    // needs them.
                     let next = half(mem, inp)?;
                     if bits <= 14 {
                         hold = hold.wrapping_add(lsl(next, bits));

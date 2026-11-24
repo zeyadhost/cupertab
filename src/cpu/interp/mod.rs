@@ -12,6 +12,7 @@
 mod arm;
 #[cfg(target_os = "emscripten")]
 mod jit;
+mod native;
 mod thumb;
 mod vfp;
 
@@ -71,6 +72,7 @@ pub struct Interp {
     exclusive: bool,
     /// User read-only thread ID register (TPIDRURO).
     pub tls: u32,
+    natives: native::Natives,
     #[cfg(target_os = "emscripten")]
     jit: jit::Cache,
 }
@@ -92,6 +94,7 @@ impl Interp {
             branched: false,
             exclusive: false,
             tls: 0,
+            natives: native::Natives::default(),
             #[cfg(target_os = "emscripten")]
             jit: jit::Cache::new(),
         }
@@ -134,16 +137,22 @@ impl Interp {
             Some(ticks) => {
                 let mut remaining = *ticks;
                 let mut result = None;
-                #[cfg(target_os = "emscripten")]
                 let mut block_entry = true;
                 while remaining > 0 {
+                    if (block_entry || self.branched) && self.natives.may_start(self.regs[15]) {
+                        if let Some(count) = self.run_native(mem, remaining) {
+                            let count = u64::from(count).min(remaining);
+                            block_entry = true;
+                            remaining -= count;
+                            continue;
+                        }
+                    }
                     // Profile branch targets and sample long straight-line
                     // sequences instead of hashing each interpreted PC.
                     #[cfg(target_os = "emscripten")]
                     if self.jit.enabled()
                         && (block_entry || self.branched || self.regs[15] & jit::SAMPLE_MASK == 0)
                     {
-                        block_entry = false;
                         let count = self.run_jit(mem, remaining);
                         if count != 0 {
                             block_entry = true;
@@ -151,6 +160,7 @@ impl Interp {
                             continue;
                         }
                     }
+                    block_entry = false;
                     remaining -= 1;
                     if let Err(e) = self.step(mem) {
                         result = Some(e);

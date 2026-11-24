@@ -367,6 +367,14 @@ impl Cpu {
         self.interp.invalidate_cache_range(base, size);
     }
 
+    /// Lets the CPU run some routines of a `dyld_v1` shared cache natively.
+    #[cfg(feature = "dynarmic")]
+    pub fn set_shared_cache(&mut self, _cache: &[u8]) {}
+    #[cfg(not(feature = "dynarmic"))]
+    pub fn set_shared_cache(&mut self, cache: &[u8]) {
+        self.interp.set_shared_cache(cache);
+    }
+
     #[cfg(feature = "dynarmic")]
     /// Start CPU execution.
     ///

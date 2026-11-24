@@ -30,6 +30,8 @@ path = "src/bin.rs"
 default = ["static", "dynarmic"]
 dynarmic = ["dep:touchHLE_dynarmic_wrapper"]
 static = ["sdl2/bundled", "sdl2/static-link", "touchHLE_openal_soft_wrapper/static"]
+# Browser-only check of each native routine against the guest code.
+native-check = []
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

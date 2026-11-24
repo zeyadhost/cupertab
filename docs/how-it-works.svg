@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="19 19 842 940" width="632" height="705" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="19 19 842 940" width="590" height="658" role="img" aria-labelledby="t d">
 <title id="t">How Cupertab works</title>
 <desc id="d">Your .ipsw and key, or an .ipa, are read into the browser tab. Inside touchHLE.wasm, Apple's own iOS 4 code runs unmodified on an ARMv6 interpreter written in Rust, with an opt-in JIT to WebAssembly. Its system calls go to Cupertab's emulated kernel. An .ipa app calls touchHLE's own frameworks instead. Frames go to a WebGL canvas, the mouse acts as a finger, and the browser's site storage keeps the root filesystem image, the decrypted shared cache, iOS's saved files and a lock screen snapshot for the next visit.</desc>
 <defs>

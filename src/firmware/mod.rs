@@ -230,7 +230,7 @@ impl Firmware {
             "{}_{}_{}",
             info.product_type, info.build, info.rootfs_name
         ));
-        // The page only supplies this file when the IPSW's SHA-256 matches.
+        // The page only supplies this file when the IPSW's digest matches.
         #[cfg(target_os = "emscripten")]
         let out_path = if cache_dir == Path::new(WEB_ROOTFS_CACHE) {
             cache_dir.join("rootfs.dmg")

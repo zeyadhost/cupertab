@@ -140,27 +140,44 @@ enter the root filesystem key for your own firmware. This browser remembers it a
   const rootfsDir = '/touchHLE-web-rootfs-v1';
   const rootfsPath = rootfsDir + '/rootfs.dmg';
   const rootfsKey = new URL('rootfs-cache-v1', document.baseURI);
-  const rootfsDigestHeader = 'X-TouchHLE-IPSW-SHA256';
+  const sharedCachePath = rootfsDir + '/shared_cache';
+  const sharedCacheKey = new URL('shared-cache-v1', document.baseURI);
+  const rootfsDigestHeader = 'X-TouchHLE-IPSW-Digest';
+  const sha256 = async (bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+    (byte) => byte.toString(16).padStart(2, '0')).join('');
+  // An IPSW is a zip file. Its central directory has the size and CRC-32 of
+  // every file in it, so hashing it is much faster than hashing the IPSW.
+  async function ipswDigest(ipsw) {
+    const tail = new DataView(await ipsw.slice(Math.max(0, ipsw.size - 65557)).arrayBuffer());
+    for (let i = tail.byteLength - 22; i >= 0; i--) {
+      if (tail.getUint32(i, true) !== 0x06054b50) continue;
+      const size = tail.getUint32(i + 12, true);
+      const offset = tail.getUint32(i + 16, true);
+      if (offset + size > ipsw.size) break;
+      return ipsw.size + '-' + await sha256(await ipsw.slice(offset, offset + size).arrayBuffer());
+    }
+    return sha256(await ipsw.arrayBuffer());
+  }
   async function restoreRootfsCache(ipsw) {
     try {
-      const cache = await caches.open('touchHLE-web-rootfs-v1');
-      const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', ipsw));
-      const digest = Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('');
-      const saved = await cache.match(rootfsKey);
-      if (saved?.headers.get(rootfsDigestHeader) === digest) {
-        const image = new Uint8Array(await saved.arrayBuffer());
-        Module.FS.mkdir(rootfsDir);
-        Module.FS.writeFile(rootfsPath, image, { canOwn: true });
-      }
+      const [cache, digest] = await Promise.all([caches.open('touchHLE-web-rootfs-v1'), ipswDigest(ipsw)]);
+      const restore = async (key, path) => {
+        const saved = await cache.match(key);
+        if (saved?.headers.get(rootfsDigestHeader) !== digest) return;
+        const bytes = new Uint8Array(await saved.arrayBuffer());
+        try { Module.FS.mkdir(rootfsDir); } catch (e) {}
+        Module.FS.writeFile(path, bytes, { canOwn: true });
+      };
+      await Promise.all([restore(rootfsKey, rootfsPath), restore(sharedCacheKey, sharedCachePath)]);
       return { cache, digest };
     } catch (err) {
       log('Root filesystem cache unavailable; booting without it.');
       return null;
     }
   }
-  async function saveRootfsCache({ cache, digest }) {
+  async function saveCacheFile({ cache, digest }, path, key) {
     const fs = Module.FS;
-    const size = fs.stat(rootfsPath).size;
+    const size = fs.stat(path).size;
     let offset = 0;
     // Stream large images without copying the whole file into one record.
     const image = new ReadableStream({
@@ -170,7 +187,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
           return;
         }
         const bytes = new Uint8Array(Math.min(size - offset, 4 * 1024 * 1024));
-        const file = fs.open(rootfsPath, 'r');
+        const file = fs.open(path, 'r');
         try {
           const n = fs.read(file, bytes, 0, bytes.length, offset);
           if (n !== bytes.length) throw new Error('Short root filesystem read');
@@ -181,7 +198,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         }
       }
     });
-    await cache.put(rootfsKey, new Response(image, {
+    await cache.put(key, new Response(image, {
       headers: { [rootfsDigestHeader]: digest }
     }));
   }
@@ -194,14 +211,15 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     ipswLabel.classList.add('disabled');
     installLabel.classList.add('disabled');
     statusEl.textContent = 'Loading ' + file.name + '…';
+    const booting = dir === '/touchHLE_ipsw';
+    const restoring = booting && restoreRootfsCache(file);
     const data = new Uint8Array(await file.arrayBuffer());
     const path = dir + '/' + file.name.replace(/[^A-Za-z0-9._-]/g, '_');
     try { Module.FS.mkdir(dir); } catch (e) {}
     Module.FS.writeFile(path, data, { canOwn: true });
-    const booting = dir === '/touchHLE_ipsw';
     Module['touchHLEFirmware'] = booting;
     if (booting) {
-      const persistent = await restoreRootfsCache(data);
+      const persistent = await restoring;
       window.touchHLEFirmwareReady = (extracted) => {
         firmwareReady = true;
         try { localStorage.setItem(keyStorage, enteredKey()); } catch (e) {}
@@ -209,8 +227,14 @@ enter the root filesystem key for your own firmware. This browser remembers it a
         Module['touchHLEFastStart'] = true;
         statusEl.textContent = 'Starting SpringBoard…';
         if (persistent && extracted) {
-          saveRootfsCache(persistent).catch(() => log('Could not save the root filesystem cache.'));
+          saveCacheFile(persistent, rootfsPath, rootfsKey)
+            .catch(() => log('Could not save the root filesystem cache.'));
         }
+      };
+      window.touchHLESharedCacheReady = () => {
+        const saving = persistent ? saveCacheFile(persistent, sharedCachePath, sharedCacheKey) : Promise.resolve();
+        saving.catch(() => log('Could not save the shared cache.'))
+          .finally(() => Module.FS.unlink(sharedCachePath));
       };
     }
     statusEl.textContent = booting

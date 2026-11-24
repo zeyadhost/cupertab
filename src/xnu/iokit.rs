@@ -917,7 +917,7 @@ fn run_mbx_commands(k: &mut Kernel, start: u32, len: u32) {
 /// Textured quad, blended source-over (premultiplied) into the destination:
 /// source and destination surface IDs, the destination bounds, then four
 /// strip-ordered vertices and their texture coordinates, normalized to the
-/// texture's padded size, and an RGBA modulation color.
+/// texture's size rounded up to powers of two, and an RGBA modulation color.
 fn mbx_draw_quad(mem: &mut Mem, src: MbxSurface, dst: MbxSurface, w: &[u32]) {
     let f = |i: usize| f32::from_bits(w[i]);
     if src.2 == 0 || src.3 == 0 {
@@ -933,7 +933,10 @@ fn mbx_draw_quad(mem: &mut Mem, src: MbxSurface, dst: MbxSurface, w: &[u32]) {
     }
     let (t0, t1, t2) = (t(0), t(1), t(2));
     let (du, dv) = ((t1.0 - t0.0, t2.0 - t0.0), (t1.1 - t0.1, t2.1 - t0.1));
-    let norm = ((src.1 / 4) as f32, src.3.next_power_of_two() as f32);
+    let norm = (
+        src.2.next_power_of_two() as f32,
+        src.3.next_power_of_two() as f32,
+    );
     let color = [f(40), f(41), f(42), f(43)];
     let clip = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
     let (x0, y0) = (clip(f(6).min(f(8)), dst.2), clip(f(7).min(f(9)), dst.3));
@@ -1417,7 +1420,10 @@ mod tests {
             return;
         }
         let (t0, t1, t2) = (t(0), t(1), t(2));
-        let norm = ((src.1 / 4) as f32, src.3.next_power_of_two() as f32);
+        let norm = (
+            src.2.next_power_of_two() as f32,
+            src.3.next_power_of_two() as f32,
+        );
         let color = [f(40), f(41), f(42), f(43)];
         let clip = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
         let (x0, y0) = (clip(f(6).min(f(8)), dst.2), clip(f(7).min(f(9)), dst.3));
@@ -1588,7 +1594,10 @@ mod tests {
     }
 
     fn random_quad(rng: &mut Rng, src: MbxSurface, dst: MbxSurface) -> Vec<u32> {
-        let norm = ((src.1 / 4) as f32, src.3.next_power_of_two() as f32);
+        let norm = (
+            src.2.next_power_of_two() as f32,
+            src.3.next_power_of_two() as f32,
+        );
         let fraction = [
             0.5, 0.25, 0.75, 0.1, 0.9, 0.49999997, 0.50000006, 0.99999994,
         ];
@@ -1750,6 +1759,31 @@ mod tests {
     }
 
     #[test]
+    fn mbx_draw_quad_scales_texture_by_power_of_two_width() {
+        // An 86-pixel-wide label in rows of 88 pixels, drawn 1:1 as SpringBoard
+        // draws it: u runs to 86 / 128.
+        let mut mem = Mem::new();
+        let src = (ARENA, 88 * 4, 86, 16);
+        let dst = (ARENA + 0x10000, 128 * 4, 128, 16);
+        let pixels: Vec<u8> = (0..88 * 16u32)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, 7, 255])
+            .collect();
+        write_bytes(&mut mem, src.0, &pixels);
+        let u = 86.0 / 128.0;
+        let p = [(0.0, 0.0), (86.0, 0.0), (0.0, 16.0), (86.0, 16.0)];
+        let t = [(0.0, 0.0), (u, 0.0), (0.0, 1.0), (u, 1.0)];
+        let w = quad_packet(p, t, [0.0, 0.0, 86.0, 16.0], [1.0; 4]);
+        mbx_draw_quad(&mut mem, src, dst, &w);
+        for y in 0..16 {
+            assert_eq!(
+                read_bytes(&mem, dst.0 + y * dst.1, 86 * 4),
+                read_bytes(&mem, src.0 + y * src.1, 86 * 4),
+                "row {y}"
+            );
+        }
+    }
+
+    #[test]
     fn mbx_copy_and_fill_match_reference() {
         let mut rng = Rng(0x2545_f491_4f6c_dd1d);
         let mut mem = Mem::new();
@@ -1860,7 +1894,10 @@ mod tests {
             }
         });
         let quad = |x: f32, y: f32, w: f32, h: f32, s: MbxSurface, angle: f32, color: [f32; 4]| {
-            let norm = ((s.1 / 4) as f32, s.3.next_power_of_two() as f32);
+            let norm = (
+                s.2.next_power_of_two() as f32,
+                s.3.next_power_of_two() as f32,
+            );
             let (sin, cos) = angle.sin_cos();
             let c = (x + w / 2.0, y + h / 2.0);
             let p =

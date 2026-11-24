@@ -608,7 +608,7 @@ impl Kernel {
     /// Starts the daemon behind a service on its first look-up, as launchd
     /// does for its jobs' MachServices. Only daemons known to work are run.
     pub fn start_on_demand(&mut self, service: &str) -> Option<u32> {
-        const ON_DEMAND: &[&str] = &["com.apple.lsd"];
+        const ON_DEMAND: &[&str] = &["com.apple.lsd", "com.apple.calaccessd"];
         if !ON_DEMAND.contains(&service) {
             return None;
         }

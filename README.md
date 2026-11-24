@@ -22,7 +22,9 @@ Cupertab (formerly touchHLE-web) is a port of [touchHLE](https://github.com/touc
 
 [Open the page](https://cupertab.dino.icu/), pick your files, and it all runs in that tab. Nothing is uploaded. Cupertab ships no Apple firmware and no keys, so you bring your own `.ipsw` and the root filesystem key for it, or a decrypted `.ipa` of an app you own. [How it works](#how-it-works) explains the parts in the picture below.
 
-<img src="docs/how-it-works.svg" alt="How Cupertab works. Your .ipsw and its key, or an .ipa, are read into the browser tab. There, Apple's own iOS 4 code runs unmodified on an ARMv6 interpreter written in Rust, and Cupertab's emulated kernel answers its system calls. An .ipa app uses touchHLE's own frameworks instead. Frames go to a WebGL canvas, the mouse acts as a finger, and site storage keeps the firmware files, iOS's saved files and a lock screen snapshot." width="100%">
+<p align="center">
+  <img src="docs/how-it-works.svg" alt="How Cupertab works. Your .ipsw and its key, or an .ipa, are read into the browser tab. There, Apple's own iOS 4 code runs unmodified on an ARMv6 interpreter written in Rust, and Cupertab's emulated kernel answers its system calls. An .ipa app uses touchHLE's own frameworks instead. Frames go to a WebGL canvas, the mouse acts as a finger, and site storage keeps the firmware files, iOS's saved files and a lock screen snapshot.">
+</p>
 
 The name Cupertab is a play on Cupertino and the word "tab". This project is not affiliated with or endorsed by Apple Inc in any way. iPhone, iOS, iPod, iPod touch and iPad are trademarks of Apple Inc in the United States and other countries.
 

@@ -325,6 +325,9 @@ impl Window {
         launch_image: Option<Image>,
         options: &Options,
     ) -> Window {
+        #[cfg(target_os = "emscripten")]
+        let title = "Cupertab";
+
         let sdl_ctx = sdl2::init().unwrap();
         let video_ctx = sdl_ctx.video().unwrap();
 

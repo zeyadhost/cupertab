@@ -3,7 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>touchHLE in the browser</title>
+<title>Cupertab: iOS 4 in a browser tab</title>
+<meta name="description" content="Cupertab is a WebAssembly port of the touchHLE iOS emulator that boots iOS 4 in a browser tab. You need your own firmware and its key.">
+<meta name="theme-color" content="#111111">
+<link rel="canonical" href="https://cupertab.dino.icu/">
+<link rel="icon" type="image/png" sizes="32x32" href="cupertab-favicon-32.png">
+<link rel="apple-touch-icon-precomposed" sizes="114x114" href="cupertab-apple-touch-icon-114.png">
+<link rel="apple-touch-icon-precomposed" sizes="57x57" href="cupertab-apple-touch-icon-57.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Cupertab">
+<meta property="og:title" content="Cupertab: iOS 4 in a browser tab">
+<meta property="og:description" content="A WebAssembly port of touchHLE that boots iOS 4 in your browser. You bring your own firmware and its key.">
+<meta property="og:url" content="https://cupertab.dino.icu/">
+<meta property="og:image" content="https://cupertab.dino.icu/cupertab-og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The Cupertab icon next to the text Cupertab: iOS 4 in a browser tab">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Cupertab: iOS 4 in a browser tab">
+<meta name="twitter:description" content="A WebAssembly port of touchHLE that boots iOS 4 in your browser. You bring your own firmware and its key.">
+<meta name="twitter:image" content="https://cupertab.dino.icu/cupertab-og.png">
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: #111; color: #ddd;
@@ -30,13 +50,13 @@
 </style>
 </head>
 <body>
-<h1>touchHLE in the browser</h1>
-<p>An experimental WebAssembly build of <a href="https://touchhle.org/">touchHLE</a>, the
+<h1>Cupertab</h1>
+<p>Cupertab is an experimental WebAssembly port of <a href="https://touchhle.org/">touchHLE</a>, the
 high-level emulator for iPhone OS 2.x&ndash;4.0 apps. Pick an <code>.ipa</code> you own, or an
 iPhone OS 4 <code>.ipsw</code> to boot Apple's own SpringBoard from it. To put apps on its home
 screen, add their <code>.ipa</code> files before booting. Files stay on your machine and run
 entirely in this tab.</p>
-<p>touchHLE-web ships no Apple firmware and no decryption keys. To boot an <code>.ipsw</code>,
+<p>Cupertab ships no Apple firmware and no decryption keys. To boot an <code>.ipsw</code>,
 enter the root filesystem key for your own firmware. This browser remembers it after a boot.</p>
 <div id="key-row">
   <label for="rootfs-key">Root filesystem key</label>
@@ -526,7 +546,7 @@ enter the root filesystem key for your own firmware. This browser remembers it a
     if (!ipswInput.files[0]) return;
     const key = enteredKey();
     if (!/^[0-9a-fA-F]{72}$/.test(key)) {
-      statusEl.textContent = 'touchHLE-web ships no Apple decryption keys. Enter the root filesystem ' +
+      statusEl.textContent = 'Cupertab ships no Apple decryption keys. Enter the root filesystem ' +
         'key for your own firmware (72 hex digits), then choose the .ipsw again.';
       ipswInput.value = '';
       keyInput.focus();

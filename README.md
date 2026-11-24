@@ -1,10 +1,12 @@
-# touchHLE-web
+# Cupertab
 
-touchHLE-web is my fork of [touchHLE](https://github.com/touchHLE/touchHLE) that runs in a web browser. touchHLE is a high-level emulator for early iOS apps. It runs the app's own ARM code, and in place of iOS it uses its own versions of the system frameworks. This fork builds it to WebAssembly. It can also boot iOS 4 from an IPSW you supply, so Apple's own SpringBoard runs in the tab.
+Formerly touchHLE-web.
 
-Try it at https://zeyad.is-a.dev/touchHLE-web/.
+Cupertab is a port of [touchHLE](https://github.com/touchHLE/touchHLE) that runs in a web browser. It started as a fork of touchHLE. touchHLE is a high-level emulator for early iOS apps. It runs the app's own ARM code, and in place of iOS it uses its own versions of the system frameworks. Cupertab builds it to WebAssembly. It can also boot iOS 4 from an IPSW you supply, so Apple's own SpringBoard runs in the tab.
 
-This project is not affiliated with or endorsed by Apple Inc in any way. iPhone, iOS, iPod, iPod touch and iPad are trademarks of Apple Inc in the United States and other countries.
+Try it at https://cupertab.dino.icu/.
+
+The name Cupertab is a play on Cupertino and the word "tab". This project is not affiliated with or endorsed by Apple Inc in any way. iPhone, iOS, iPod, iPod touch and iPad are trademarks of Apple Inc in the United States and other countries.
 
 Only use touchHLE to emulate software you have obtained legally.
 
@@ -20,7 +22,7 @@ Each page load runs one file. To run another, reload the page. Anything the app 
 
 ## Booting iOS 4
 
-touchHLE-web ships no Apple firmware and no decryption keys. To boot iOS 4 you need your own `.ipsw` and the root filesystem key for that firmware. The root filesystem image inside an IPSW is encrypted, and touchHLE can't read it without the key.
+Cupertab ships no Apple firmware and no decryption keys. To boot iOS 4 you need your own `.ipsw` and the root filesystem key for that firmware. The root filesystem image inside an IPSW is encrypted, and touchHLE can't read it without the key.
 
 1. Type the key (72 hex digits) into the "Root filesystem key" field.
 2. To put your own apps on the home screen, click "Add .ipa to home screen" and pick them.
@@ -40,7 +42,7 @@ Everything the page saves (the root filesystem image, the decrypted shared cache
 
 ## The JIT
 
-By default the guest's ARM code runs in an interpreter. To try the experimental JIT, add `?jit=on` to the address: https://zeyad.is-a.dev/touchHLE-web/?jit=on. It turns hot blocks of ARM and Thumb code into WebAssembly, and the rest still runs in the interpreter. If the browser won't compile a block, that code stays in the interpreter too.
+By default the guest's ARM code runs in an interpreter. To try the experimental JIT, add `?jit=on` to the address: https://cupertab.dino.icu/?jit=on. It turns hot blocks of ARM and Thumb code into WebAssembly, and the rest still runs in the interpreter. If the browser won't compile a block, that code stays in the interpreter too.
 
 ## Browser requirements
 
@@ -64,8 +66,8 @@ The interpreter only does ARMv6 (ARM, Thumb-1 and VFPv2), so if an app has both 
 You need the [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html), activated so `emcc` is on `PATH` (CI uses 7.0.0). You also need Rust, CMake, make and Python 3.
 
 ```sh
-git clone https://github.com/zeyadhost/touchHLE-web.git
-cd touchHLE-web
+git clone https://github.com/zeyadhost/cupertab.git
+cd cupertab
 git submodule update --init --depth 1
 rustup target add wasm32-unknown-emscripten
 web/build.sh
@@ -82,7 +84,7 @@ The native desktop and Android builds are still in this repo, and CI still build
 
 ## Reporting problems
 
-Open an issue at https://github.com/zeyadhost/touchHLE-web/issues. Say which browser you used and which app or firmware (device and build), and paste the log from the box under the screen. Don't attach IPSWs or keys. Please don't report problems with the web build to upstream touchHLE, because they don't work on this fork.
+Open an issue at https://github.com/zeyadhost/cupertab/issues. Say which browser you used and which app or firmware (device and build), and paste the log from the box under the screen. Don't attach IPSWs or keys. Please don't report problems with the web build to upstream touchHLE, because they don't work on Cupertab.
 
 ## Upstream
 

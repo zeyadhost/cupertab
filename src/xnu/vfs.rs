@@ -341,7 +341,7 @@ impl Vfs {
             .map_or(0, |d| d.as_secs() as u32);
         Ok(Stat {
             mode,
-            ino: 0x10000000 + (m.len() ^ mtime as u64),
+            ino: Self::host_ino(&m),
             size: m.len(),
             uid: 501,
             gid: 501,
@@ -361,6 +361,20 @@ impl Vfs {
     #[cfg(not(unix))]
     fn host_file_mode(_: &std::fs::Metadata) -> u16 {
         0o100644
+    }
+
+    /// A host file's own inode number, so files stay apart. SQLite keys its
+    /// locks by device and inode, and its databases hang or fail when all
+    /// files share one.
+    #[cfg(unix)]
+    fn host_ino(m: &std::fs::Metadata) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        0x10000000 + m.ino()
+    }
+
+    #[cfg(not(unix))]
+    fn host_ino(_: &std::fs::Metadata) -> u64 {
+        0x10000000
     }
 
     fn device(path: &str) -> Option<u8> {
@@ -603,7 +617,7 @@ impl Vfs {
                 let m = file.metadata().map_err(|_| EBADF)?;
                 Ok(Stat {
                     mode: Self::host_file_mode(&m),
-                    ino: 0x10000000,
+                    ino: Self::host_ino(&m),
                     size: m.len(),
                     uid: 501,
                     gid: 501,

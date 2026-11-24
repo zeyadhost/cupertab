@@ -9,7 +9,7 @@ rustflags = [
     "-C", "link-arg=-sDEFAULT_TO_CXX",
     "-C", "link-arg=-lopenal",
     "-C", "link-arg=-sASYNCIFY",
-    "-C", "link-arg=-sASYNCIFY_REMOVE=touchhle_run_jit_block",
+    "-C", "link-arg=-sASYNCIFY_REMOVE=touchhle_run_jit_block,<touchHLE::cpu::interp::Interp>::*",
     "-C", "link-arg=-sASYNCIFY_STACK_SIZE=1048576",
     "-C", "link-arg=-sALLOW_MEMORY_GROWTH",
     "-C", "link-arg=-sALLOW_TABLE_GROWTH",

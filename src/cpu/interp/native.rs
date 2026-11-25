@@ -24,9 +24,9 @@ use super::Interp;
 use crate::mem::{Mem, Ptr};
 
 #[cfg(target_os = "emscripten")]
-const LIMIT: u64 = Mem::CPU_WINDOW_MASK as u64 + 1;
+const MASK: u32 = Mem::CPU_WINDOW_MASK;
 #[cfg(not(target_os = "emscripten"))]
-const LIMIT: u64 = u32::MAX as u64;
+const MASK: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Routine {
@@ -272,9 +272,9 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// Whether `[addr, addr + len)` is memory the interpreter reaches without a
-/// fault and without the browser window's address folding.
+/// fault, in one run of host memory.
 fn plain(mem: &Mem, addr: u32, len: u32) -> bool {
-    addr >= mem.null_segment_size() && u64::from(addr) + u64::from(len) <= LIMIT
+    addr >= mem.null_segment_size() && u64::from(addr & MASK) + u64::from(len) <= u64::from(MASK)
 }
 
 impl Interp {
@@ -310,11 +310,7 @@ impl Interp {
                     if !plain(mem, r0, r2) || !plain(mem, r1, r2) {
                         return None;
                     }
-                    let low = r0.min(r1);
-                    let span = r0.max(r1) - low + r2;
-                    let (src, dst) = ((r1 - low) as usize, (r0 - low) as usize);
-                    mem.bytes_at_mut(Ptr::from_bits(low), span)
-                        .copy_within(src..src + r2 as usize, dst);
+                    mem.memmove(Ptr::from_bits(r0), Ptr::from_bits(r1), r2);
                 }
                 r2
             }

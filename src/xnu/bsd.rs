@@ -449,6 +449,9 @@ impl Kernel {
             None
         };
         if flags & MAP_FIXED != 0 {
+            if !self.vm.may_map_fixed(addr, size) {
+                return Ret::Err(ENOMEM);
+            }
             self.shared_forget(addr, size);
         }
         let base = if flags & MAP_FIXED != 0 {

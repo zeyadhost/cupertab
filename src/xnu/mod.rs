@@ -35,6 +35,10 @@ const SHARED_CACHE_PATH: &str = "/System/Library/Caches/com.apple.dyld/dyld_shar
 /// Main thread stack, just below dyld like on a device.
 const STACK_TOP: u32 = 0x2fe00000;
 const STACK_SIZE: u32 = 1024 * 1024;
+#[cfg(target_os = "emscripten")]
+const VM_TOP: u32 = (STACK_TOP - STACK_SIZE) & Mem::CPU_WINDOW_MASK;
+#[cfg(not(target_os = "emscripten"))]
+const VM_TOP: u32 = 0x2f000000;
 /// The comm page: read-only kernel data mapped into every task.
 pub const COMM_PAGE: u32 = 0xffff4000;
 
@@ -239,7 +243,7 @@ impl Kernel {
         env: Vec<String>,
     ) -> Result<(Mem, VmMap, Cpu), String> {
         let mut mem = Mem::new();
-        let mut vm = VmMap::new(0x1000, 0x2f000000);
+        let mut vm = VmMap::new(0x1000, VM_TOP);
 
         // Installed apps live on the data partition, in the overlay.
         let exe = match vfs.resolve(fw, exe_path, true) {
@@ -589,7 +593,7 @@ impl Kernel {
             self.kill_process(pid);
         }
         for job in lockdown::take_spawns() {
-            // Each process gets its own 1GiB memory window on the web, so
+            // Each process gets its own 512MiB memory window on the web, so
             // only one app runs at a time there.
             if cfg!(target_os = "emscripten") && job.label.starts_with("UIKitApplication:") {
                 for pid in lockdown::running_apps() {

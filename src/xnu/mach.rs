@@ -243,8 +243,9 @@ impl Kernel {
         }
         if flags & VM_FLAGS_ANYWHERE != 0 {
             self.vm.map_anywhere(addr, size, mask, Prot::RW, tag.into())
-        } else if flags & VM_FLAGS_OVERWRITE != 0
-            || self.vm.is_free(addr & !0xfff, super::vm::round_up(size))
+        } else if (flags & VM_FLAGS_OVERWRITE != 0
+            || self.vm.is_free(addr & !0xfff, super::vm::round_up(size)))
+            && self.vm.may_map_fixed(addr, size)
         {
             self.vm
                 .map_fixed(addr, size, Prot::RW, tag.into())

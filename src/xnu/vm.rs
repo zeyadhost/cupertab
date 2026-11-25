@@ -47,6 +47,11 @@ impl VmMap {
         }
     }
 
+    pub fn may_map_fixed(&self, addr: u32, size: u32) -> bool {
+        cfg!(not(target_os = "emscripten"))
+            || (addr >= self.low && addr as u64 + size as u64 <= self.high as u64)
+    }
+
     pub fn is_free(&self, addr: u32, size: u32) -> bool {
         let end = addr as u64 + size as u64;
         if let Some((&base, r)) = self.regions.range(..end as u32).next_back() {

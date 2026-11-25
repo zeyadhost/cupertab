@@ -66,7 +66,7 @@ By default the guest's ARM code runs in an interpreter. To try the experimental 
 
 ## Browser requirements
 
-The page needs WebAssembly, WebGL and a lot of memory. It asks for about 1.2 GB when it starts, and booting iOS 4 takes it past 2 GB. It has been tested in desktop Chromium. Reloading the same tab many times can run it out of memory, so open a new tab instead.
+The page needs WebAssembly, WebGL and a lot of memory. It asks for about 1.2 GB when it starts. Booting iOS 4 takes it to about 1.3 GB, and an open app adds about 0.5 GB (Calendar starts a helper process too, so it adds about 1 GB). It has been tested in desktop Chromium. Reloading the same tab many times can run it out of memory, so open a new tab instead.
 
 ## How it works
 
@@ -83,7 +83,7 @@ Frames go to a canvas on the page. gl4es gives touchHLE OpenGL on top of WebGL. 
 | Part | Native | Web |
 | --- | --- | --- |
 | CPU | Dynarmic JIT | Rust interpreter, opt-in Wasm JIT |
-| Guest memory | 4 GiB reservation | 1 GiB window per process; the top 16 MiB (main thread stack) folds into its end |
+| Guest memory | 4 GiB reservation | 512 MiB window per process; higher addresses (shared cache, bundled dylibs, main thread stack) fold into it |
 | Coroutines | corosensei | Emscripten fibers (`src/coroutine.rs`), needs `-sASYNCIFY` |
 | OpenGL | GLES 1.1 or GL 2.1 compat | GL 2.1 from [gl4es](https://github.com/ptitSeb/gl4es) on WebGL 1, one gl4es state per touchHLE context |
 | Windowing, audio | SDL2, OpenAL Soft | Emscripten's SDL2 and OpenAL ports |

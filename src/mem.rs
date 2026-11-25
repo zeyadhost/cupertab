@@ -211,10 +211,11 @@ impl<T: SafeRead> SafeWrite for T {}
 type Bytes = [u8; 1 << 32];
 /// WebAssembly can't reserve a 4GiB guest address space alongside the host
 /// heap, so guest addresses are folded into a smaller window: the bottom of
-/// the address space (binaries, heap) and the top 16MiB (main thread stack)
-/// share it, and the VM allocator never hands out addresses that would alias.
+/// the address space (binaries, heap), the shared cache and bundled dylibs,
+/// and the top 16MiB (main thread stack) share it, and the VM allocators never
+/// hand out addresses that would alias.
 #[cfg(target_os = "emscripten")]
-const WINDOW_SIZE: usize = 1 << 30;
+const WINDOW_SIZE: usize = 1 << 29;
 #[cfg(target_os = "emscripten")]
 type Bytes = [u8; WINDOW_SIZE];
 #[cfg(target_os = "emscripten")]
@@ -416,6 +417,10 @@ impl Mem {
 
     #[cfg(target_os = "emscripten")]
     pub(crate) const CPU_WINDOW_MASK: u32 = (WINDOW_SIZE - 1) as u32;
+
+    pub(crate) fn is_contiguous(addr: VAddr, len: GuestUSize) -> bool {
+        host_index(addr) as u64 + u64::from(len) < std::mem::size_of::<Bytes>() as u64
+    }
 
     /// Borrow the same guest window used by cpu_read/cpu_write for one
     /// translated block. No other access to it may run in the meantime.
@@ -841,6 +846,8 @@ impl Mem {
     /// Permanently mark a region of address space as being unusable to the
     /// memory allocator.
     pub fn reserve(&mut self, base: VAddr, size: GuestUSize) {
+        #[cfg(target_os = "emscripten")]
+        let base = host_index(base) as VAddr;
         #[cfg(target_os = "emscripten")]
         assert!(
             base as u64 + size as u64 <= (WINDOW_SIZE as u64) - WINDOW_TOP_RESERVED as u64,

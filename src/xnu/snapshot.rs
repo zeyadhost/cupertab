@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 const DIR: &str = "/touchHLE-snapshot";
 const PAGE: usize = 0x1000;
-const WINDOW: usize = 1 << 30;
+const WINDOW: usize = Mem::CPU_WINDOW_MASK as usize + 1;
 static ZERO: [u8; PAGE] = [0; PAGE];
 /// How long the data partition may stay busy once the lock screen is up.
 const SETTLE: Duration = Duration::from_secs(3);
@@ -519,13 +519,13 @@ impl Get for OpenFile {
     }
 }
 
-/// The shared cache's mappings: address, size, file offset.
+/// The shared cache's mappings: address in the window, size, file offset.
 fn cache_maps(cache: &[u8]) -> Vec<(usize, usize, usize)> {
     let le = |o: usize| u32::from_le_bytes(cache[o..o + 4].try_into().unwrap()) as usize;
     let (off, count) = (le(16), le(20));
     (0..count)
         .map(|i| off + i * 32)
-        .map(|m| (le(m), le(m + 8), le(m + 16)))
+        .map(|m| (le(m) & (WINDOW - 1), le(m + 8), le(m + 16)))
         .collect()
 }
 
@@ -656,7 +656,7 @@ fn capture(cpu: &mut Cpu) -> (CpuContext, u32) {
 
 /// A snapshot only fits the build that made it.
 fn header() -> String {
-    format!("touchHLE snapshot 1 {}\n", crate::VERSION)
+    format!("touchHLE snapshot 2 {}\n", crate::VERSION)
 }
 
 fn save(k: &mut Kernel) -> Vec<u8> {

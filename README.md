@@ -1,10 +1,30 @@
-# Cupertab
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/title-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/title-light.png">
+    <img src="docs/title-light.png" alt="Cupertab" width="415">
+  </picture>
+</h1>
 
-Formerly touchHLE-web.
+**iOS 4 in a browser tab. It boots Apple's own SpringBoard from an IPSW you bring.**
 
-Cupertab is a port of [touchHLE](https://github.com/touchHLE/touchHLE) that runs in a web browser. It started as a fork of touchHLE. touchHLE is a high-level emulator for early iOS apps. It runs the app's own ARM code, and in place of iOS it uses its own versions of the system frameworks. Cupertab builds it to WebAssembly. It can also boot iOS 4 from an IPSW you supply, so Apple's own SpringBoard runs in the tab.
+<p align="center">
+  <a href="https://cupertab.dino.icu/">Try it</a> ·
+  <a href="#booting-ios-4">Boot iOS 4</a> ·
+  <a href="#running-an-app">Run an app</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#the-jit">The JIT</a> ·
+  <a href="#building-it">Build it</a> ·
+  <a href="#reporting-problems">Report a bug</a>
+</p>
 
-Try it at https://cupertab.dino.icu/.
+Cupertab (formerly touchHLE-web) is a port of [touchHLE](https://github.com/touchHLE/touchHLE) that runs in a web browser. It started as a fork of touchHLE. touchHLE is a high-level emulator for early iOS apps. It runs the app's own ARM code, and in place of iOS it uses its own versions of the system frameworks. Cupertab builds it to WebAssembly. It can also boot iOS 4 from an IPSW you supply. For that, Cupertab emulates the iOS kernel, so Apple's own SpringBoard and apps run in the tab unmodified.
+
+[Open the page](https://cupertab.dino.icu/), pick your files, and it all runs in that tab. Nothing is uploaded. Cupertab ships no Apple firmware and no keys, so you bring your own `.ipsw` and the root filesystem key for it, or a decrypted `.ipa` of an app you own. [How it works](#how-it-works) explains the parts in the picture below.
+
+<p align="center">
+  <img src="docs/how-it-works.svg" alt="How Cupertab works. Your .ipsw and its key, or an .ipa, are read into the browser tab. There, Apple's own iOS 4 code runs unmodified on an ARMv6 interpreter written in Rust, and Cupertab's emulated kernel answers its system calls. An .ipa app uses touchHLE's own frameworks instead. Frames go to a WebGL canvas, the mouse acts as a finger, and site storage keeps the firmware files, iOS's saved files and a lock screen snapshot.">
+</p>
 
 The name Cupertab is a play on Cupertino and the word "tab". This project is not affiliated with or endorsed by Apple Inc in any way. iPhone, iOS, iPod, iPod touch and iPad are trademarks of Apple Inc in the United States and other countries.
 
@@ -36,7 +56,7 @@ The screen stays black while it boots, so watch the status line above it. The Ho
 
 The first boot unpacks the root filesystem image from the IPSW and saves it in the browser's site storage. It keeps one image, from the last IPSW. If you pick the same IPSW again, the page skips that step. The saved image is still encrypted, so every boot needs the key. Once the key opens the firmware, the page remembers it. The page also saves the decrypted dyld shared cache from that image, so later boots skip decrypting and inflating it (about 170 MB, a few seconds of work).
 
-When a boot reaches the lock screen, the page also saves a snapshot of it. The next time you pick the same IPSW with the same key, the page starts from that snapshot, so the lock screen shows up in under a second instead of after a full boot. If the snapshot can't be used (it's damaged, from another build, or slow to read), the page deletes it, boots normally, and saves a new one. The same happens when iOS has changed its saved files since the snapshot was taken. To turn snapshots off, add `?snapshot=off` to the address.
+When a boot reaches the lock screen, the page also saves a snapshot of it. The next time you pick the same IPSW with the same key, the page starts from that snapshot, so the lock screen shows up in under a second instead of after a full boot. If the snapshot can't be used (it's damaged, from another build, or slow to read), the page deletes it, boots normally, and saves a new one. The same happens when iOS has changed its saved files since the snapshot was taken. The page doesn't use or save a snapshot when you add .ipa files to the home screen. To turn snapshots off, add `?snapshot=off` to the address.
 
 Everything the page saves (the root filesystem image, the decrypted shared cache, iOS's own saved files and the snapshot) stays in your browser's site storage and is never uploaded. The "Clear saved data" link deletes all of it, and so does clearing the site's data.
 
@@ -48,7 +68,17 @@ By default the guest's ARM code runs in an interpreter. To try the experimental 
 
 The page needs WebAssembly, WebGL and a lot of memory. It asks for about 1.2 GB when it starts, and booting iOS 4 takes it past 2 GB. It has been tested in desktop Chromium. Reloading the same tab many times can run it out of memory, so open a new tab instead.
 
-## How the web build differs from native
+## How it works
+
+Everything runs in one browser tab. The page reads your files into the tab, and touchHLE runs them there. touchHLE is built to WebAssembly with Emscripten, as `touchHLE.wasm`. The picture at the top shows these parts.
+
+The code that runs under emulation is ARM code. For an IPSW, that's Apple's own iOS 4: SpringBoard, the apps and the dyld shared cache, none of it changed. For an `.ipa`, it's the app's own code. It runs on an ARMv6 interpreter written in Rust, which does ARM, Thumb-1 and VFPv2. With `?jit=on`, hot blocks also get turned into WebAssembly (see [The JIT](#the-jit)). When iOS 4 runs, a few hot routines in the shared cache, like `memmove` and zlib's `inflate_fast`, run as Rust code instead of ARM code, with the same result.
+
+iOS 4 calls its kernel with the `svc` instruction, and Cupertab answers. It handles the BSD system calls, Mach traps and messages, and IOKit, including the MBX 2D blitter that SpringBoard draws with. It also stands in for a few system services, such as installd, notifyd and lockdownd. An `.ipa` skips all of that. touchHLE links it to its own versions of UIKit, OpenGL ES, OpenAL and other frameworks, written in Rust.
+
+Frames go to a canvas on the page. gl4es gives touchHLE OpenGL on top of WebGL. The mouse acts as a finger, and the Home key presses the Home button. For iOS 4, the browser's site storage keeps the root filesystem image, the decrypted shared cache, iOS's saved files and a snapshot of the lock screen, so a repeat visit can start from the snapshot. [Booting iOS 4](#booting-ios-4) has the details.
+
+### How the web build differs from native
 
 | Part | Native | Web |
 | --- | --- | --- |

@@ -161,10 +161,12 @@ impl Kernel {
         exe_path: &str,
         mut argv: Vec<String>,
     ) -> Result<Kernel, String> {
+        let mut env = Vec::new();
         // Emulated apps start far slower than on a phone, so turn off
         // SpringBoard's launch watchdog, as when debugging on a device.
         if exe_path.ends_with("/SpringBoard") {
             argv.extend(["-SBNoWatchdogs".to_string(), "YES".to_string()]);
+            env.push("CA_AUTO_ENABLE_OGL=0".to_string());
             if cfg!(target_os = "emscripten") {
                 // On the web, loading an app blocks input and evicts the
                 // previous app. Start Phone and Mail only when requested.
@@ -181,8 +183,7 @@ impl Kernel {
         }
         let vfs = vfs::Vfs::new(overlay_dir);
         let shared_cache = Self::read_shared_cache(&fw)?;
-        let (mem, vm, cpu) =
-            Self::load_image(&fw, &vfs, &shared_cache, exe_path, &argv, Vec::new())?;
+        let (mem, vm, cpu) = Self::load_image(&fw, &vfs, &shared_cache, exe_path, &argv, env)?;
 
         let mut ipc = mach::Ipc::new();
         let thread_port = ipc.new_kernel_port(mach::KObject::Thread(0));

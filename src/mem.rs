@@ -418,10 +418,6 @@ impl Mem {
     #[cfg(target_os = "emscripten")]
     pub(crate) const CPU_WINDOW_MASK: u32 = (WINDOW_SIZE - 1) as u32;
 
-    pub(crate) fn is_contiguous(addr: VAddr, len: GuestUSize) -> bool {
-        host_index(addr) as u64 + u64::from(len) < std::mem::size_of::<Bytes>() as u64
-    }
-
     /// Borrow the same guest window used by cpu_read/cpu_write for one
     /// translated block. No other access to it may run in the meantime.
     #[cfg(target_os = "emscripten")]

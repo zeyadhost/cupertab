@@ -23,6 +23,11 @@
 use super::Interp;
 use crate::mem::{Mem, Ptr};
 
+#[cfg(target_os = "emscripten")]
+const MASK: u32 = Mem::CPU_WINDOW_MASK;
+#[cfg(not(target_os = "emscripten"))]
+const MASK: u32 = u32::MAX;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Routine {
     Memmove,
@@ -269,7 +274,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// Whether `[addr, addr + len)` is memory the interpreter reaches without a
 /// fault, in one run of host memory.
 fn plain(mem: &Mem, addr: u32, len: u32) -> bool {
-    addr >= mem.null_segment_size() && Mem::is_contiguous(addr, len)
+    addr >= mem.null_segment_size() && u64::from(addr & MASK) + u64::from(len) <= u64::from(MASK)
 }
 
 impl Interp {
